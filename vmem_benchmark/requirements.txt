@@ -1,0 +1,64 @@
+# ==============================================================================
+# Comprehensive Requirements for Vmem Robustness Benchmark
+# ==============================================================================
+# This file consolidates all dependencies for the Vmem Robustness Benchmark,
+# combining core ML frameworks, event dataset processing tools, SNN networks,
+# and downstream data analysis libraries.
+#
+# Installation Guide:
+#   1. Create & activate environment: python -m venv .venv; .venv\Scripts\activate
+#   2. Install PyTorch with CUDA:
+#      pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu121
+#   3. Install the remaining requirements:
+#      pip install -r requirements.txt
+#   4. (Optional) Install CuPy matching your exact CUDA toolkit version:
+#      pip install cupy-cuda12x==13.6.0
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Core Deep Learning & Spiking Neural Networks (SNN)
+# ------------------------------------------------------------------------------
+torch==2.5.1+cu121                 # Core PyTorch framework
+torchvision==0.20.1+cu121           # Computer vision models and operations
+torchaudio==2.5.1+cu121             # Audio processing (aligned with PyTorch version)
+pytorch-lightning==1.8.6           # Model encapsulation and evaluation framework
+spikingjelly==0.0.0.0.14           # Spiking Neural Network (SNN) activation layers and clock-driven LIF modules
+einops==0.8.2                      # Flexible tensor rearrangements used inside the hybrid backbone
+torchdata==0.7.1                   # Data loading pipelines (with robust fallback mocks in extract.py)
+
+# ------------------------------------------------------------------------------
+# Config & Environment Management
+# ------------------------------------------------------------------------------
+hydra-core==1.3.2                  # Hierarchical configuration management
+omegaconf==2.3.0                   # YAML-based config parser for loading HybridDetection settings
+
+# ------------------------------------------------------------------------------
+# High-Performance Data & File I/O
+# ------------------------------------------------------------------------------
+numpy==1.26.3                      # Numerical calculations & array handling (capped to prevent 2.x API incompatibilities)
+scipy==1.16.3                      # Scientific computation, matrix operations, and statistics
+pandas==3.0.3                      # Tabular dataset and run metrics aggregation
+tables==3.11.1                     # PyTables: HDF5 database loading
+h5py==3.16.0                       # HDF5 file handling
+hdf5plugin==6.0.0                  # HDF5 compression plugins for reading stacked histograms
+
+# ------------------------------------------------------------------------------
+# GPU Event Processing Acceleration
+# ------------------------------------------------------------------------------
+cupy-cuda12x==13.6.0               # GPU event-corruption processing (CUDA 12.x compatible)
+
+# ------------------------------------------------------------------------------
+# Analysis, Metrics & Plotting
+# ------------------------------------------------------------------------------
+scikit-learn==1.8.0                # Machine learning algorithms
+matplotlib==3.10.9                 # Generation of heatmaps, sensitivity plots, and performance charts
+tqdm==4.67.3                       # Beautiful console progress bars for overall and per-sequence steps
+PyYAML==6.0.3                      # Safe YAML file loading and parsing
+
+# ------------------------------------------------------------------------------
+# Miscellaneous Utilities
+# ------------------------------------------------------------------------------
+StrEnum==0.4.15                    # String-based Enums for structural typing of corruptions
+bbox_visualizer==0.3.0             # Bounding box drawing for manual output verification
+pycocotools==2.0.11                # COCO evaluation API required by HybridDetection
+setuptools==81.0.0                 # Provides pkg_resources, required by older PyTorch Lightning builds (removed in setuptools>=82)

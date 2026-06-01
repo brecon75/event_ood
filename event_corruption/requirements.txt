@@ -1,0 +1,9 @@
+numpy>=1.24
+tables>=3.9          # PyTables — bundles HDF5 1.14.x (h5py 3.12+ bundles HDF5 2.0 which is broken)
+pyyaml>=6.0
+tqdm>=4.66.0
+
+# GPU acceleration (optional but recommended — RTX 4060 confirmed working)
+# Install the wheel matching your CUDA version:
+cupy-cuda12x>=13.0   # CUDA 12.x  ← use this (driver version 576.28, CUDA 12.9 detected)
+# cupy-cuda11x>=13.0 # CUDA 11.x  ← use this instead if on CUDA 11

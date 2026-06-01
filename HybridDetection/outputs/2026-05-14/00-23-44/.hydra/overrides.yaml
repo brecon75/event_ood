@@ -1,0 +1,9 @@
+- dataset=gen1
+- +experiment/gen1=no_lstm.yaml
+- dataset.path=.\gen1
+- checkpoint=.\gen1_mAP36.ckpt
+- checkpoint_load_strict=false
+- use_test_set=false
+- hardware.gpus=0
+- batch_size.eval=8
+- hardware.num_workers.eval=4

@@ -130,6 +130,89 @@ class VmemMonitor:
         return torch.cat(parts, dim=-1)  # (B, 3 * sum(C_layers))
 
     # ------------------------------------------------------------------
+    # Spatial GAP trajectory extraction (B, T, sum(C_layers))
+    # ------------------------------------------------------------------
+    def collect_temporal_gap(self) -> torch.Tensor:
+        """
+        Compute spatial Global Average Pooling (GAP) online on GPU
+        over hooked layers to bypass the 15 TB trajectory storage bottleneck.
+
+        Returns
+        -------
+        (B, T, sum(C_layers)) on CPU
+        """
+        parts = []
+        for idx in sorted(self._v.keys()):
+            v_list = self._v[idx]
+            if not v_list:
+                continue
+            V = torch.cat(v_list, dim=1)  # (T, B, C, H, W)
+            T, B, C, H, W = V.shape
+
+            # Spatial average: (T, B, C, H, W) -> (T, B, C)
+            V_gap = V.mean(dim=(3, 4))
+            parts.append(V_gap.cpu())
+
+        if not parts:
+            return torch.empty((0,))
+
+        # Concatenate channels along dim -1: (T, B, sum(C_layers))
+        cat_gap = torch.cat(parts, dim=-1)
+        # Permute (T, B, sum(C_layers)) -> (B, T, sum(C_layers))
+        return cat_gap.permute(1, 0, 2)
+
+    # ------------------------------------------------------------------
+    # Temporal phi extraction (B, sum_layers * 7)
+    # ------------------------------------------------------------------
+    def collect_temporal_phi(self, theta: float = 1.0) -> torch.Tensor:
+        parts = []
+        for idx in sorted(self._v.keys()):
+            v_list = self._v[idx]
+            if not v_list:
+                continue
+            V = torch.cat(v_list, dim=1)  # (T, B, C, H, W)
+            T, B, C, H, W = V.shape
+            if T < 2:
+                continue
+            
+            # Average over channels and space to get scalar trace per batch sample: (T, B)
+            V_scalar = V.mean(dim=(2, 3, 4))
+            
+            margin = theta - V_scalar  # (T, B)
+            m_mean = margin.mean(dim=0)  # (B,)
+            m_min  = margin.min(dim=0).values  # (B,)
+            m_var  = margin.var(dim=0, unbiased=False)  # (B,)
+            
+            dV      = V_scalar[1:] - V_scalar[:-1]  # (T-1, B)
+            dV_mean = dV.abs().mean(dim=0)  # (B,)
+            dV_var  = dV.var(dim=0, unbiased=False)  # (B,)
+            
+            std  = V_scalar.std(dim=0, unbiased=False).clamp(min=1e-8)  # (B,)
+            Vc   = V_scalar - V_scalar.mean(dim=0, keepdim=True)  # (T, B)
+            autocorr = (Vc[:-1] * Vc[1:]).mean(dim=0) / std ** 2  # (B,)
+            
+            fft_mag  = torch.fft.rfft(V_scalar, dim=0).abs() ** 2  # (freq, B)
+            total_e  = fft_mag.sum(dim=0).clamp(min=1e-8)  # (B,)
+            hf_e     = fft_mag[max(1, T // 4):].sum(dim=0)  # (B,)
+            hf_ratio = hf_e / total_e  # (B,)
+            
+            # Stack features: shape (B, 7)
+            layer_feat = torch.stack(
+                [m_mean, m_min, m_var, dV_mean, dV_var, autocorr, hf_ratio], dim=1
+            )
+            parts.append(layer_feat)
+            
+        if not parts:
+            device = "cpu"
+            for k in self._v:
+                if self._v[k]:
+                    device = self._v[k][0].device
+                    break
+            return torch.empty((0, 0), device=device)
+            
+        return torch.cat(parts, dim=1)  # (B, sum_layers * 7)
+
+    # ------------------------------------------------------------------
     # Trajectory extraction  {layer_idx: (T, n_samples, D)}
     # ------------------------------------------------------------------
     def trajectories(self, n_samples: int = 50) -> Dict[int, torch.Tensor]:

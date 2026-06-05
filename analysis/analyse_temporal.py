@@ -54,48 +54,113 @@ def run_temporal_analysis(all_phi):
         return
 
     clean_tp = all_tphi["clean"]
-    hc_scorer = mahalanobis_scorer(clean_tp)
-    hc_clean_scores = hc_scorer(clean_tp)
+    
+    # Split handcrafted temporal phi (70% train / 30% test)
+    rng = np.random.default_rng(42)
+    indices = np.arange(len(clean_tp))
+    rng.shuffle(indices)
+    split_idx = int(len(clean_tp) * 0.7)
+    clean_tp_train = clean_tp[indices[:split_idx]]
+    clean_tp_test = clean_tp[indices[split_idx:]]
+    
+    hc_scorer = mahalanobis_scorer(clean_tp_train)
+    hc_clean_scores = hc_scorer(clean_tp_test)
 
-    clean_traj_path = cfg.TRAJ_DIR / "clean.pt"
+    # Look for pre-computed temporal gap trajectories
+    tgap_dir = cfg.OUTPUT_DIR / "temporal_gap"
+    clean_tgap_path = tgap_dir / "clean.pt"
+    
     ta_scorer = None
     ta_clean_scores = None
     all_prepared_trajs = {}
 
-    if clean_traj_path.exists():
-        print("  Loading and preparing trajectories for sequence learning...")
-        import gc
+    if clean_tgap_path.exists():
+        print("  Loading pre-computed full-dataset temporal gap trajectories for sequence learning...")
         try:
-            clean_data = torch.load(clean_traj_path, map_location="cpu", weights_only=True)
-            clean_trajs = clean_data["trajs"]
+            clean_data = torch.load(clean_tgap_path, map_location="cpu", weights_only=True)
+            clean_tgap = clean_data["temporal_gap"] # (B, T, sum_C) tensor
             
-            print("  Training Temporal Autoencoder on clean trajectories...")
-            ta_scorer = temporal_autoencoder_scorer(clean_trajs)
-            ta_clean_scores = ta_scorer(clean_trajs)
+            # Split clean temporal gap into train/test
+            n_samples = len(clean_tgap)
+            split_idx = int(n_samples * 0.7)
             
-            all_prepared_trajs["clean"] = prepare_temporal_ae_input(clean_trajs)
+            rng = np.random.default_rng(42)
+            indices = np.arange(n_samples)
+            rng.shuffle(indices)
+            train_indices = indices[:split_idx]
+            test_indices = indices[split_idx:]
             
-            del clean_data, clean_trajs
-            gc.collect()
+            train_tgap = clean_tgap[train_indices]
+            test_tgap = clean_tgap[test_indices]
+            
+            print(f"  Training Temporal Autoencoder on clean split ({len(train_tgap)} samples)...")
+            ta_scorer = temporal_autoencoder_scorer(train_tgap)
+            ta_clean_scores = ta_scorer(test_tgap)
+            
+            all_prepared_trajs["clean"] = test_tgap
             
             for c_name in present:
                 for sev in cfg.SEVERITIES:
                     rn = f"{c_name}_L{sev}"
-                    tp_path = cfg.TRAJ_DIR / f"{rn}.pt"
-                    if tp_path.exists():
+                    tgap_path = tgap_dir / f"{rn}.pt"
+                    if tgap_path.exists():
                         try:
-                            print(f"  Preparing trajectory {tp_path.name} for sequence learning...")
-                            c_data = torch.load(tp_path, map_location="cpu", weights_only=True)
-                            all_prepared_trajs[rn] = prepare_temporal_ae_input(c_data["trajs"])
-                            del c_data
-                            gc.collect()
+                            c_data = torch.load(tgap_path, map_location="cpu", weights_only=True)
+                            all_prepared_trajs[rn] = c_data["temporal_gap"]
                         except Exception as e:
-                            print(f"    Failed to load/prepare {tp_path.name}: {e}")
+                            print(f"    Failed to load {tgap_path.name}: {e}")
         except Exception as e:
-            print(f"  [!] Failed to initialize sequence learning: {e}")
+            print(f"  [!] Failed to initialize sequence learning from temporal gap: {e}")
             ta_scorer = None
     else:
-        print("  No clean.pt found in trajs/. Skipping Temporal Autoencoder sequence learning.")
+        print("  No pre-computed temporal gap found. Checking for raw trajectories fallback...")
+        clean_traj_path = cfg.TRAJ_DIR / "clean.pt"
+        if clean_traj_path.exists():
+            print("  Loading and preparing raw trajectories (capped at 50 samples)...")
+            import gc
+            try:
+                clean_data = torch.load(clean_traj_path, map_location="cpu", weights_only=True)
+                clean_trajs = clean_data["trajs"]
+                clean_x = prepare_temporal_ae_input(clean_trajs)
+                
+                # Split raw clean trajectories train/test
+                n_samples = len(clean_x)
+                split_idx = int(n_samples * 0.7)
+                rng = np.random.default_rng(42)
+                indices = np.arange(n_samples)
+                rng.shuffle(indices)
+                train_indices = indices[:split_idx]
+                test_indices = indices[split_idx:]
+                
+                train_x = clean_x[train_indices]
+                test_x = clean_x[test_indices]
+                
+                print(f"  Training Temporal Autoencoder on raw clean split ({len(train_x)} samples)...")
+                ta_scorer = temporal_autoencoder_scorer(train_x)
+                ta_clean_scores = ta_scorer(test_x)
+                
+                all_prepared_trajs["clean"] = test_x
+                
+                del clean_data, clean_trajs
+                gc.collect()
+                
+                for c_name in present:
+                    for sev in cfg.SEVERITIES:
+                        rn = f"{c_name}_L{sev}"
+                        tp_path = cfg.TRAJ_DIR / f"{rn}.pt"
+                        if tp_path.exists():
+                            try:
+                                c_data = torch.load(tp_path, map_location="cpu", weights_only=True)
+                                all_prepared_trajs[rn] = prepare_temporal_ae_input(c_data["trajs"])
+                                del c_data
+                                gc.collect()
+                            except Exception as e:
+                                print(f"    Failed to load/prepare {tp_path.name}: {e}")
+            except Exception as e:
+                print(f"  [!] Failed to initialize raw sequence learning: {e}")
+                ta_scorer = None
+        else:
+            print("  No clean.pt found in trajs/. Skipping Temporal Autoencoder sequence learning.")
 
     print(f"\n  {'Corruption':<25}  Handcrafted AUROC  Temporal AE AUROC")
     print("  " + "-" * 60)

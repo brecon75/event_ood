@@ -153,6 +153,8 @@ def resolve_defaults_and_args():
     resolved_output = None
     if args.output_dir:
         resolved_output = Path(args.output_dir)
+    elif hasattr(cfg, "OUTPUT_DIR"):
+        resolved_output = cfg.OUTPUT_DIR
     else:
         resolved_output = _HERE / "outputs"
         print(f"[*] Using local outputs directory: {resolved_output}")
@@ -165,6 +167,7 @@ def resolve_defaults_and_args():
     cfg.PHI_DIR = cfg.OUTPUT_DIR / "phi"
     cfg.TRAJ_DIR = cfg.OUTPUT_DIR / "trajs"
     cfg.PLOT_DIR = cfg.OUTPUT_DIR / "plots"
+    cfg.TEMPORAL_PHI_DIR = cfg.OUTPUT_DIR / "temporal_phi"
     
     # Direct Input Directory Bypass (None if not explicitly passed)
     if args.input_dir:
@@ -328,7 +331,8 @@ def run_benchmark():
         historical_phi = None    # phi tensor loaded from a previous completed run
         done_seqs = set()        # sequence indices already processed
 
-        if phi_path.exists():
+        tgap_path = cfg.OUTPUT_DIR / "temporal_gap" / f"{run_name}.pt"
+        if phi_path.exists() and tgap_path.exists():
             existing = torch.load(phi_path, weights_only=False)
             done_seqs_saved = set(existing.get('done_seqs', []))
             max_seq = getattr(cfg, 'MAX_SEQUENCES', None)
@@ -386,6 +390,8 @@ def run_benchmark():
             
             # These lists hold GPU tensors temporarily for this sequence to avoid blocking syncs
             seq_phi_gpu = []
+            seq_temporal_phi_cpu = []
+            seq_temporal_gap_cpu = []
             seq_traj_cpu = {l: [] for l in range(4)}  # Max 4 layers
 
             for j in range(0, n_frames, cfg.BATCH_SIZE):
@@ -404,6 +410,16 @@ def run_benchmark():
                 phi_batch = monitor.collect_phi()
                 if phi_batch.numel() > 0:
                     seq_phi_gpu.append(phi_batch)
+
+                # Collect temporal phi online
+                tphi_batch = monitor.collect_temporal_phi()
+                if tphi_batch.numel() > 0:
+                    seq_temporal_phi_cpu.append(tphi_batch)
+
+                # Collect temporal GAP online (breaks 50-sequence bottleneck)
+                tgap_batch = monitor.collect_temporal_gap()
+                if tgap_batch.numel() > 0:
+                    seq_temporal_gap_cpu.append(tgap_batch)
 
                 # Collect trajectory snapshots
                 if n_trajs_saved < cfg.TRAJ_SAVE_N:
@@ -424,6 +440,25 @@ def run_benchmark():
                 torch.save(phi_seq, seq_pt)
                 del phi_seq
                 gc.collect()
+
+            # Save sequence temporal phi online
+            if seq_temporal_phi_cpu:
+                tphi_seq = torch.cat(seq_temporal_phi_cpu, dim=0)
+                tphi_tmp_dir = cfg.TEMPORAL_PHI_DIR / f"_tmp_{run_name}"
+                tphi_tmp_dir.mkdir(parents=True, exist_ok=True)
+                torch.save(tphi_seq, tphi_tmp_dir / f"seq_{i:05d}.pt")
+                del tphi_seq
+                gc.collect()
+
+            # Save sequence temporal gap online
+            if seq_temporal_gap_cpu:
+                tgap_seq = torch.cat(seq_temporal_gap_cpu, dim=0)
+                tgap_tmp_dir = cfg.OUTPUT_DIR / "temporal_gap" / f"_tmp_{run_name}"
+                tgap_tmp_dir.mkdir(parents=True, exist_ok=True)
+                torch.save(tgap_seq, tgap_tmp_dir / f"seq_{i:05d}.pt")
+                del tgap_seq
+                gc.collect()
+
                 
             for l_idx, tensor_list in seq_traj_cpu.items():
                 if tensor_list:
@@ -464,6 +499,48 @@ def run_benchmark():
             if traj_bank:
                 traj_final = {l: torch.cat(v, dim=1) for l, v in traj_bank.items()}
                 torch.save({'trajs': traj_final, 'run': run_name}, traj_path)
+
+            # --- Merge temporal phi tmp files ---
+            tphi_tmp_dir = cfg.TEMPORAL_PHI_DIR / f"_tmp_{run_name}"
+            if tphi_tmp_dir.exists():
+                tphi_files = sorted(tphi_tmp_dir.glob("seq_*.pt"))
+                if tphi_files:
+                    tphi_final = torch.cat(
+                        [torch.load(f, weights_only=True) for f in tphi_files], dim=0
+                    )
+                    cfg.TEMPORAL_PHI_DIR.mkdir(parents=True, exist_ok=True)
+                    torch.save({'temporal_phi': tphi_final, 'run': run_name},
+                               cfg.TEMPORAL_PHI_DIR / f"{run_name}.pt")
+                    overall_pbar.write(
+                        f"  Saved temporal phi: {tphi_final.shape} -> {run_name}.pt"
+                    )
+                    del tphi_final
+                    for f in tphi_files:
+                        f.unlink()
+                    if not any(tphi_tmp_dir.iterdir()):
+                        tphi_tmp_dir.rmdir()
+
+            # --- Merge temporal gap trajectories tmp files ---
+            tgap_tmp_dir = cfg.OUTPUT_DIR / "temporal_gap" / f"_tmp_{run_name}"
+            if tgap_tmp_dir.exists():
+                tgap_files = sorted(tgap_tmp_dir.glob("seq_*.pt"))
+                if tgap_files:
+                    tgap_final = torch.cat(
+                        [torch.load(f, weights_only=True) for f in tgap_files], dim=0
+                    )
+                    tgap_dir = cfg.OUTPUT_DIR / "temporal_gap"
+                    tgap_dir.mkdir(parents=True, exist_ok=True)
+                    torch.save({'temporal_gap': tgap_final, 'run': run_name},
+                               tgap_dir / f"{run_name}.pt")
+                    overall_pbar.write(
+                        f"  Saved temporal gap: {tgap_final.shape} -> {run_name}.pt"
+                    )
+                    del tgap_final
+                    for f in tgap_files:
+                        f.unlink()
+                    if not any(tgap_tmp_dir.iterdir()):
+                        tgap_tmp_dir.rmdir()
+
         else:
             overall_pbar.write(f"  Warning: No data collected for {run_name}")
             if not any(phi_tmp_dir.iterdir()):

@@ -27,6 +27,18 @@ from analysis.analyse_plots import (
 # LEVEL 2 — Per-layer AUROC breakdown
 # ─────────────────────────────────────────────────────────────────────────────
 
+def split_clean(clean, train_ratio=0.7):
+    rng = np.random.default_rng(42)
+    indices = np.arange(len(clean))
+    rng.shuffle(indices)
+    split_idx = int(len(clean) * train_ratio)
+    return clean[indices[:split_idx]], clean[indices[split_idx:]]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LEVEL 2 — Per-layer AUROC breakdown
+# ─────────────────────────────────────────────────────────────────────────────
+
 def run_per_layer_auroc_table(all_phi):
     print("\n======================================================")
     print(" LEVEL 2 - Per-Layer x Per-Corruption AUROC Table")
@@ -38,14 +50,16 @@ def run_per_layer_auroc_table(all_phi):
         print("  No corrupted runs found.")
         return None
 
+    clean_train, clean_test = split_clean(clean)
     valid = _valid_layers(clean.shape[1])
     rows  = []
 
     for spec in valid + [{"name": "ALL (concat)", "idx": -1}]:
         is_all = spec["idx"] == -1
-        layer_clean = clean if is_all else slice_phi_layer(clean, spec["idx"])
-        scorer = mahalanobis_scorer(layer_clean)
-        cs = scorer(layer_clean)
+        layer_clean_train = clean_train if is_all else slice_phi_layer(clean_train, spec["idx"])
+        layer_clean_test = clean_test if is_all else slice_phi_layer(clean_test, spec["idx"])
+        scorer = mahalanobis_scorer(layer_clean_train)
+        cs = scorer(layer_clean_test)
 
         row  = {"Layer": spec["name"]}
         avgs = []
@@ -96,6 +110,7 @@ def run_statwise_ablation(all_phi):
         print("  No corrupted runs found.")
         return
 
+    clean_train, clean_test = split_clean(clean)
     STAT_CONFIGS = [
         ("mean only",      "mu"),
         ("var only",       "var"),
@@ -107,9 +122,10 @@ def run_statwise_ablation(all_phi):
     bar_means = {}
 
     for stat_label, stat_key in STAT_CONFIGS:
-        clean_sub = clean if stat_key is None else slice_phi_stat(clean, stat_key)
-        scorer    = mahalanobis_scorer(clean_sub)
-        cs        = scorer(clean_sub)
+        clean_train_sub = clean_train if stat_key is None else slice_phi_stat(clean_train, stat_key)
+        clean_test_sub = clean_test if stat_key is None else slice_phi_stat(clean_test, stat_key)
+        scorer    = mahalanobis_scorer(clean_train_sub)
+        cs        = scorer(clean_test_sub)
         c_aurocs  = {}
         for c_name in present:
             aurocs = []
@@ -145,21 +161,23 @@ def run_detector_comparison(all_phi):
         print("  No corrupted runs found.")
         return
 
+    clean_train, clean_test = split_clean(clean)
+
     DETECTORS = {
-        "Mahalanobis":  mahalanobis_scorer(clean),
-        "kNN (k=5)":    knn_scorer(clean, k=5),
-        "GMM":          gmm_scorer(clean, n_components=5),
-        "PCA-Mahal":    pca_mahalanobis_scorer(clean, n_components=50),
-        "One-Class SVM": ocsvm_scorer(clean),
-        "Normalizing Flow": normalizing_flow_scorer(clean, n_components=50),
-        "Autoencoder":   autoencoder_scorer(clean),
+        "Mahalanobis":  mahalanobis_scorer(clean_train),
+        "kNN (k=5)":    knn_scorer(clean_train, k=5),
+        "GMM":          gmm_scorer(clean_train, n_components=5),
+        "PCA-Mahal":    pca_mahalanobis_scorer(clean_train, n_components=50),
+        "One-Class SVM": ocsvm_scorer(clean_train),
+        "Normalizing Flow": normalizing_flow_scorer(clean_train, n_components=50),
+        "Autoencoder":   autoencoder_scorer(clean_train),
     }
 
     summary = {}
     per_corr = {det: {} for det in DETECTORS}
 
     for det_name, scorer in DETECTORS.items():
-        cs = scorer(clean)
+        cs = scorer(clean_test)
         all_aurocs, all_fprs = [], []
         for c_name in present:
             aurocs, fprs = [], []
@@ -213,8 +231,9 @@ def run_spearman_severity(all_phi):
     print("  (rho > 0: AUROC rises with severity  |  p < 0.05: significant)")
 
     clean  = all_phi["clean"]
-    scorer = mahalanobis_scorer(clean)
-    cs     = scorer(clean)
+    clean_train, clean_test = split_clean(clean)
+    scorer = mahalanobis_scorer(clean_train)
+    cs     = scorer(clean_test)
 
     print(f"\n  {'Corruption':<25}  rho       p-val   n_sev")
     print("  " + "-" * 55)
@@ -257,20 +276,21 @@ def save_full_results_table(all_phi):
     print("======================================================")
 
     clean = all_phi["clean"]
+    clean_train, clean_test = split_clean(clean)
     DETECTORS = {
-        "Mahalanobis":      mahalanobis_scorer(clean),
-        "kNN":              knn_scorer(clean, k=5),
-        "GMM":              gmm_scorer(clean, n_components=5),
-        "PCA-Mahal":        pca_mahalanobis_scorer(clean, n_components=50),
-        "One-Class SVM":    ocsvm_scorer(clean),
-        "Normalizing Flow": normalizing_flow_scorer(clean, n_components=50),
-        "Autoencoder":      autoencoder_scorer(clean),
+        "Mahalanobis":      mahalanobis_scorer(clean_train),
+        "kNN":              knn_scorer(clean_train, k=5),
+        "GMM":              gmm_scorer(clean_train, n_components=5),
+        "PCA-Mahal":        pca_mahalanobis_scorer(clean_train, n_components=50),
+        "One-Class SVM":    ocsvm_scorer(clean_train),
+        "Normalizing Flow": normalizing_flow_scorer(clean_train, n_components=50),
+        "Autoencoder":      autoencoder_scorer(clean_train),
     }
 
     clean_scores = {}
     for det_name, scorer in DETECTORS.items():
         print(f"Pre-computing clean scores for {det_name}...")
-        clean_scores[det_name] = scorer(clean)
+        clean_scores[det_name] = scorer(clean_test)
 
     rows = []
     for c_name in cfg.CORRUPTIONS:
@@ -279,7 +299,7 @@ def save_full_results_table(all_phi):
             if rn not in all_phi:
                 continue
             row  = {"Corruption": c_name, "Severity": sev}
-            yt   = np.concatenate([np.zeros(len(clean)), np.ones(len(all_phi[rn]))])
+            yt   = np.concatenate([np.zeros(len(clean_test)), np.ones(len(all_phi[rn]))])
             for det_name, scorer in DETECTORS.items():
                 cs = clean_scores[det_name]
                 ys = np.concatenate([cs, scorer(all_phi[rn])])
@@ -373,8 +393,8 @@ def run_severity_regression(all_phi):
             w.writeheader()
             w.writerows(rows)
         print(f"  Saved severity_regression.csv")
-
-
+        
+        
 def run_corruption_classification(all_phi):
     print("\n======================================================")
     print(" LEVEL 8 - Corruption Classification (Idea 3)")
@@ -434,3 +454,69 @@ def run_corruption_classification(all_phi):
                     "Support": int(v["support"])
                 })
         print("  Saved corruption_classification_report.csv")
+
+
+def run_conformal_prediction(all_phi):
+    print("\n======================================================")
+    print(" LEVEL 9 - Conformal Prediction (Idea 6)")
+    print("======================================================")
+    
+    clean_phi = all_phi["clean"]
+    present = _get_present(all_phi)
+    if not present:
+        print("  No corrupted runs found.")
+        return
+
+    clean_train, clean_test = split_clean(clean_phi)
+    scorer = mahalanobis_scorer(clean_train)
+    cal_scores = scorer(clean_test)
+    
+    q_low = float(np.percentile(cal_scores, 90))
+    q_high = float(np.percentile(cal_scores, 99))
+    
+    print(f"  Calibration thresholds derived from {len(cal_scores)} clean frames:")
+    print(f"    q_low (90% quantile)  = {q_low:.4f}")
+    print(f"    q_high (99% quantile) = {q_high:.4f}")
+    print()
+
+    rows = []
+    c_clean = np.sum(cal_scores <= q_low) / len(cal_scores)
+    c_amb = np.sum((cal_scores > q_low) & (cal_scores <= q_high)) / len(cal_scores)
+    c_ood = np.sum(cal_scores > q_high) / len(cal_scores)
+    print(f"  Clean: Clean={c_clean*100:.1f}%, Ambiguous={c_amb*100:.1f}%, OOD={c_ood*100:.1f}%")
+    rows.append({
+        "Corruption": "clean",
+        "Severity": 0,
+        "Clean (90% Conf.)": round(c_clean, 4),
+        "Ambiguous": round(c_amb, 4),
+        "OOD (99% Conf.)": round(c_ood, 4)
+    })
+
+    for c_name in present:
+        for sev in cfg.SEVERITIES:
+            rn = f"{c_name}_L{sev}"
+            if rn not in all_phi:
+                continue
+            test_phi = all_phi[rn]
+            test_results = scorer(test_phi)
+            n = len(test_results)
+            p_clean = np.sum(test_results <= q_low) / n
+            p_amb = np.sum((test_results > q_low) & (test_results <= q_high)) / n
+            p_ood = np.sum(test_results > q_high) / n
+            
+            print(f"  {c_name:<18} L{sev} : Clean={p_clean*100:.1f}%, Ambiguous={p_amb*100:.1f}%, OOD={p_ood*100:.1f}%")
+            rows.append({
+                "Corruption": c_name,
+                "Severity": sev,
+                "Clean (90% Conf.)": round(p_clean, 4),
+                "Ambiguous": round(p_amb, 4),
+                "OOD (99% Conf.)": round(p_ood, 4)
+            })
+
+    TABLE_DIR.mkdir(parents=True, exist_ok=True)
+    with open(TABLE_DIR / "conformal_prediction.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["Corruption", "Severity", "Clean (90% Conf.)", "Ambiguous", "OOD (99% Conf.)"])
+        w.writeheader()
+        w.writerows(rows)
+    print(f"\n  Saved conformal_prediction.csv")
+

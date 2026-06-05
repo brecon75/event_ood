@@ -23,10 +23,11 @@ HYBRID_DIR = Path("d:/Perdue/HybridDetection") # repo root (for sys.path)
 # ---------------------------------------------------------------------------
 # Output directory (auto-created)
 # ---------------------------------------------------------------------------
-OUTPUT_DIR = Path("d:/Perdue/vmem_benchmark/outputs")
+OUTPUT_DIR = Path("d:/Perdue/vmem_benchmark/test_outputs")
 PHI_DIR    = OUTPUT_DIR / "phi"
 TRAJ_DIR   = OUTPUT_DIR / "trajs"
 PLOT_DIR   = OUTPUT_DIR / "plots"
+TEMPORAL_PHI_DIR = OUTPUT_DIR / "temporal_phi"
 
 # ---------------------------------------------------------------------------
 # Inference settings

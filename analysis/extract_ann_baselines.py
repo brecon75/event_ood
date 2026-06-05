@@ -7,6 +7,9 @@ from tqdm import tqdm
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "event_corruption"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "HybridDetection"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "vmem_benchmark"))
 from vmem_benchmark import benchmark_config as cfg
 from event_corruption.pipeline.loader import load_histogram
 from vmem_benchmark.corruption_wrap import apply_corruption_to_tensor

@@ -33,3 +33,7 @@ vmem_benchmark/.venv/
 .idea/
 *.swp
 *.swo
+
+# Live logs & temporary backups
+test_pipeline_live.log
+vmem_benchmark/benchmark_config.py.bak

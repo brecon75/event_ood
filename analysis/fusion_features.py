@@ -8,8 +8,9 @@ import joblib
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vmem_benchmark import benchmark_config as cfg
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from analysis.legacy_utils import mahalanobis_scorer, slice_phi_layer
+from analysis.vmem_scorers import mahalanobis_scorer
+from analysis.vmem_utils import slice_phi_layer
+
 
 def load_all_features():
     # Load all representations

@@ -293,12 +293,25 @@ def run_benchmark():
     # 3. Discover Sequences
     input_dir = getattr(cfg, "INPUT_DIR", None)
     if input_dir is None:
-        input_dir = cfg.GEN1_ROOT / cfg.SPLIT
-        print_desc = f"in {cfg.SPLIT} split"
+        default_dir = cfg.GEN1_ROOT / cfg.SPLIT
+        label_files = sorted(default_dir.glob("*/labels_v2/labels.npz"))
+        if len(label_files) > 0:
+            input_dir = default_dir
+            print_desc = f"in {cfg.SPLIT} split"
+        else:
+            # Fallback: check if the gen1-root directory itself contains the sequences directly
+            direct_files = sorted(cfg.GEN1_ROOT.glob("*/labels_v2/labels.npz"))
+            if len(direct_files) > 0:
+                input_dir = cfg.GEN1_ROOT
+                label_files = direct_files
+                print_desc = "directly in Gen1 root directory"
+            else:
+                input_dir = default_dir
+                print_desc = f"in {cfg.SPLIT} split"
     else:
+        label_files = sorted(input_dir.glob("*/labels_v2/labels.npz"))
         print_desc = "in custom input directory"
     
-    label_files = sorted(input_dir.glob("*/labels_v2/labels.npz"))
     seq_dirs = [p.parent.parent for p in label_files]
     
     # We process all sequences in the split

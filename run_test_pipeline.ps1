@@ -15,10 +15,15 @@ if (Test-Path $BACKUP_FILE) { Remove-Item $BACKUP_FILE }
 Copy-Item $CONFIG_FILE -Destination $BACKUP_FILE
 
 try {
-    # 2. Modify config temporarily to cap at 2 sequences
-    $content = Get-Content $CONFIG_FILE
-    $content = $content -replace "MAX_SEQUENCES\s*=\s*\d+", "MAX_SEQUENCES  = 2"
-    $content | Set-Content $CONFIG_FILE
+    # 2. Append temporary test overrides to config file (will override previous declarations)
+    $Overrides = @"
+
+# --- TEMPORARY TEST OVERRIDES ---
+MAX_SEQUENCES = 1
+CORRUPTIONS = ["hot_pixel", "event_flood"]
+SEVERITIES = [5]
+"@
+    Add-Content $CONFIG_FILE $Overrides
 
     # 3. Execute full benchmark forwarding any arguments (like GPU configuration)
     .\run_full_benchmark.ps1 @args

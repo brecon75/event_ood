@@ -25,10 +25,14 @@ restore_config() {
 # Ensure config is restored on exit
 trap restore_config EXIT
 
-# 2. Modify config temporarily (replace MAX_SEQUENCES = <number> with 2)
-# Using sed with cross-platform compatibility:
-sed -i.tmp 's/MAX_SEQUENCES[[:space:]]*=[[:space:]]*[0-9]*/MAX_SEQUENCES  = 2/g' "$CONFIG_FILE"
-rm -f "${CONFIG_FILE}.tmp"
+# 2. Append temporary test overrides to the config file (will override previous declarations)
+cat << 'EOF' >> "$CONFIG_FILE"
+
+# --- TEMPORARY TEST OVERRIDES ---
+MAX_SEQUENCES = 1
+CORRUPTIONS = ["hot_pixel", "event_flood"]
+SEVERITIES = [5]
+EOF
 
 # 3. Execute full benchmark forwarding any arguments
 ./run_full_benchmark.sh "$@"

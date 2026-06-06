@@ -21,7 +21,7 @@ try {
     $content | Set-Content $CONFIG_FILE
 
     # 3. Execute full benchmark forwarding any arguments (like GPU configuration)
-    .\run_full_benchmark.ps1 $args
+    .\run_full_benchmark.ps1 @args
 }
 finally {
     # 4. Restore original config

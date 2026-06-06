@@ -25,9 +25,9 @@ if ($CUDA_AVAILABLE) {
 }
 Write-Host "======================================================================="
 
-Write-Host "Stage 1: Running full feature extraction (31 runs, all sequences)..."
-if ($CUDA_AVAILABLE) { Write-Host "  --> Running extract.py on GPU (CUDA)..." -ForegroundColor Cyan }
-& $PYTHON vmem_benchmark/extract.py
+Write-Host "Stage 1: Running parallel feature extraction (31 runs, all sequences)..."
+if ($CUDA_AVAILABLE) { Write-Host "  --> Running run_parallel_extract.py on GPU (CUDA)..." -ForegroundColor Cyan }
+& $PYTHON vmem_benchmark/run_parallel_extract.py $args
 
 Write-Host "Stage 2: Extracting offline features (Temporal AE + margin histograms)..."
 if ($CUDA_AVAILABLE) { Write-Host "  --> Running extract_offline_features.py (Temporal AE training) on GPU (CUDA)..." -ForegroundColor Cyan }

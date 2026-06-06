@@ -91,6 +91,7 @@ def main():
         
         # Build command arguments
         cmd_args = [python_exe, str(extract_py)]
+        cmd_args.extend(unknown)
         
         if corr_subset:
             cmd_args.extend(["--corruptions"] + corr_subset)

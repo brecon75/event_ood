@@ -22,9 +22,9 @@ else
 fi
 echo "======================================================================="
 
-echo "Stage 1: Running full feature extraction (31 runs, all sequences)..."
-if [ "$CUDA_AVAILABLE" = true ]; then echo -e "  --> Running extract.py on GPU (CUDA)..."; fi
-$PYTHON vmem_benchmark/extract.py
+echo "Stage 1: Running parallel feature extraction (31 runs, all sequences)..."
+if [ "$CUDA_AVAILABLE" = true ]; then echo -e "  --> Running run_parallel_extract.py on GPU (CUDA)..."; fi
+$PYTHON vmem_benchmark/run_parallel_extract.py "$@"
 
 echo "Stage 2: Extracting offline features (Temporal AE + margin histograms)..."
 if [ "$CUDA_AVAILABLE" = true ]; then echo -e "  --> Running extract_offline_features.py (Temporal AE training) on GPU (CUDA)..."; fi

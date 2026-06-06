@@ -14,21 +14,21 @@ Raw event-camera data is corrupted at five severity levels across multiple corru
 The SNN backbone's membrane potential trajectories (`φ`) are extracted for each corrupted run and
 fed through a battery of detectors and statistical tests.
 
-The pipeline is orchestrated end-to-end by `run_test_pipeline.py`, which chains the following stages in order:
+The pipeline is orchestrated end-to-end by `run_full_benchmark.ps1` (or `run_full_benchmark.sh`), which chains the following stages in order:
 
 ```
-test_pipeline.py  →  extract.py  →  extract_offline_features.py
+run_full_benchmark  →  run_parallel_extract.py  →  extract_offline_features.py
 →  fusion_features.py  →  extract_ann_baselines.py  →  evaluate_ann_baselines.py
 →  fit_detectors.py   →  evaluate_detectors.py   →  representation_ablation.py
 →  severity.py        →  reliability.py           →  cross_corruption.py
-→  free_rider_ablation.py  →  analyse.py
+→  free_rider_ablation.py  →  analyse.py            →  build_paper_tables.py / build_paper_figures.py
 ```
 
 ---
 
 ## Stage-by-Stage Description
 
-### Stage 1 — Feature Extraction (`extract.py`)
+### Stage 1 — Feature Extraction (`run_parallel_extract.py` calling `extract.py`)
 
 Runs the trained hybrid SNN–ANN backbone on clean and corrupted input sequences.
 For each sequence the `VmemMonitor` hooks into all PLIF (Parametric Leaky Integrate-and-Fire) layers

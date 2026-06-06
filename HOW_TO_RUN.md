@@ -1,8 +1,12 @@
-# HOW TO RUN
+# HOW TO RUN THE SNN Robustness Benchmark
+
+This guide outlines how to install dependencies, configure the environment, and execute the robustness evaluation pipeline.
+
+---
 
 ## 1. Installation
 
-Run these commands in your terminal inside the `vmem_benchmark` directory to set up the environment and install all dependencies:
+Execute the following commands to initialize the Python virtual environment and install dependencies:
 
 ```powershell
 # Create and activate virtual environment
@@ -20,16 +24,43 @@ pip install -r requirements.txt
 
 ---
 
-## 2. Run the Benchmark
+## 2. Running the Full Pipeline
 
-Run the feature extraction command by explicitly passing the paths to your local directories:
+The benchmark can be executed end-to-end using the native runner scripts in the root directory. They run Stage 1 in parallel to speed up extraction, then run the downstream analysis and reporting scripts.
 
-### High-GPU (16GB+ VRAM):
+### On Windows (PowerShell):
 ```powershell
-python extract.py --gen1-root "C:/path/to/gen1" --ckpt "C:/path/to/HybridDetection/gen1_mAP36.ckpt" --hybrid-dir "C:/path/to/HybridDetection" --corruption-dir "C:/path/to/event_corruption" --vram-fraction 1.0
+# Run with default settings (automatically uses parallel extraction on visible GPUs)
+.\run_full_benchmark.ps1
+
+# Run with custom paths and settings forwarded to the extraction engine
+.\run_full_benchmark.ps1 --gpus 0 --workers-per-gpu 2 --gen1-root "C:/path/to/gen1" --output-dir "C:/path/to/outputs"
 ```
 
-### Low-GPU (8GB VRAM or less):
-```powershell
-python extract.py --gen1-root "C:/path/to/gen1" --ckpt "C:/path/to/HybridDetection/gen1_mAP36.ckpt" --hybrid-dir "C:/path/to/HybridDetection" --corruption-dir "C:/path/to/event_corruption" --vram-fraction 0.7
+### On Linux / Bash:
+```bash
+# Run with default settings
+./run_full_benchmark.sh
+
+# Run with custom paths and settings
+./run_full_benchmark.sh --gpus 0 1 2 3 --max-seq 200
 ```
+
+---
+
+## 3. Running Parallel Extraction Manually
+
+If you only want to run the parallel extraction stage (`Stage 1`) to generate feature files:
+
+```powershell
+# Run across 4 GPUs on a cluster node (one worker per GPU)
+python vmem_benchmark/run_parallel_extract.py --gpus 0 1 2 3
+
+# Run on a single GPU with 3 parallel processes (maximizes GPU utilization)
+python vmem_benchmark/run_parallel_extract.py --gpus 0 --workers-per-gpu 3
+
+# Override dataset paths and split
+python vmem_benchmark/run_parallel_extract.py --gpus 0 --gen1-root "/path/to/gen1" --split test
+```
+
+*Logs for individual parallel worker processes are saved under `vmem_benchmark/outputs/logs/worker_<id>.log` to prevent interleaved console prints.*

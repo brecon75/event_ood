@@ -4,6 +4,7 @@ import pandas as pd
 import joblib
 from pathlib import Path
 from sklearn.metrics import roc_auc_score, average_precision_score
+from tqdm import tqdm
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -31,11 +32,13 @@ def score_pca(model, X):
     return np.linalg.norm(X - X_recon, axis=1)
 
 def score_ae(model, X):
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = model.to(device)
     model.eval()
     with torch.no_grad():
-        X_t = torch.tensor(X, dtype=torch.float32)
+        X_t = torch.tensor(X, dtype=torch.float32).to(device)
         recon = model(X_t)
-        scores = torch.norm(X_t - recon, dim=1).numpy()
+        scores = torch.norm(X_t - recon, dim=1).cpu().numpy()
     return scores
 
 def main():
@@ -46,7 +49,7 @@ def main():
         print("Error: 'clean' run not found.")
         return
         
-    out_dir = Path("outputs/detectors")
+    out_dir = cfg.DETECTOR_DIR
     if not out_dir.exists():
         print(f"Error: Detectors not found in {out_dir}. Run fit_detectors.py first.")
         return
@@ -86,7 +89,7 @@ def main():
         elif name == 'ae':
             clean_scores[name] = score_ae(model, X_clean)
             
-    for run_name, feats in all_feats.items():
+    for run_name, feats in tqdm(list(all_feats.items()), desc="Evaluating detectors"):
         if run_name == 'clean': continue
         
         X_test = extract_representation(feats, 'membrane_fused')
@@ -110,9 +113,14 @@ def main():
             y_true = np.concatenate([np.zeros(len(clean_scores[name])), np.ones(len(test_scores))])
             y_score = np.concatenate([clean_scores[name], test_scores])
             
-            auroc = roc_auc_score(y_true, y_score)
-            aupr = average_precision_score(y_true, y_score)
-            fpr95 = calc_fpr95(y_true, y_score)
+            if len(np.unique(y_true)) < 2:
+                continue
+            try:
+                auroc = roc_auc_score(y_true, y_score)
+                aupr = average_precision_score(y_true, y_score)
+                fpr95 = calc_fpr95(y_true, y_score)
+            except Exception:
+                continue
             
             parts = run_name.rsplit('_L', 1)
             corruption = parts[0]
@@ -154,7 +162,7 @@ def main():
     df = pd.DataFrame(results)
     df_3p = pd.DataFrame(sev3plus_results)
     
-    res_dir = Path("results")
+    res_dir = cfg.OUTPUT_DIR / "results"
     res_dir.mkdir(parents=True, exist_ok=True)
     df.to_csv(res_dir / "ood_metrics.csv", index=False)
     df_3p.to_csv(res_dir / "severity3plus_metrics.csv", index=False)

@@ -4,6 +4,7 @@ import pandas as pd
 from pathlib import Path
 from sklearn.metrics import roc_auc_score, average_precision_score, roc_curve
 from sklearn.covariance import LedoitWolf
+from tqdm import tqdm
 from sklearn.neighbors import NearestNeighbors
 from scipy.special import logsumexp
 
@@ -59,7 +60,8 @@ class DetectorMahalanobis:
 class DetectorKNN:
     def __init__(self, k=5): self.k = k; self.nn = None
     def fit(self, feats, logits):
-        self.nn = NearestNeighbors(n_neighbors=self.k, metric='euclidean').fit(feats.numpy())
+        k = min(self.k, feats.shape[0])  # clamp k to available samples
+        self.nn = NearestNeighbors(n_neighbors=k, metric='euclidean').fit(feats.numpy())
     def score(self, feats, logits):
         dists, _ = self.nn.kneighbors(feats.numpy())
         return dists.mean(axis=1)
@@ -87,13 +89,16 @@ class DetectorReAct:
 
 class DetectorViM:
     def __init__(self):
-        self.w = None; self.alpha = None; self.u = None
+        self.vh = None
     def fit(self, feats, logits):
         # Simplified ViM: Principal space of features + logits
         f = feats.numpy() - feats.numpy().mean(axis=0)
         u, s, vh = np.linalg.svd(f, full_matrices=False)
-        self.vh = vh[:50] # Top 50 principal components
+        n_comp = min(50, vh.shape[0])  # clamp to available components
+        self.vh = vh[:n_comp]
     def score(self, feats, logits):
+        if self.vh is None:
+            return np.zeros(feats.shape[0])
         f = feats.numpy()
         proj = f @ self.vh.T @ self.vh
         res = f - proj
@@ -153,7 +158,7 @@ def evaluate_representation(rep_name, rep_dir):
     
     results = []
     
-    for f in rep_dir.glob("*.pt"):
+    for f in tqdm(list(rep_dir.glob("*.pt")), desc=f"Evaluating {rep_name} runs"):
         run_name = f.stem
         if run_name == "clean": continue
         
@@ -170,9 +175,15 @@ def evaluate_representation(rep_name, rep_dir):
             y_true = np.concatenate([np.zeros(len(clean_scores[name])), np.ones(len(t_scores))])
             y_score = np.concatenate([clean_scores[name], t_scores])
             
-            auroc = roc_auc_score(y_true, y_score)
-            aupr = average_precision_score(y_true, y_score)
-            fpr95 = calc_fpr95(y_true, y_score)
+            # Guard against degenerate case (only 1 class present)
+            if len(np.unique(y_true)) < 2:
+                continue
+            try:
+                auroc = roc_auc_score(y_true, y_score)
+                aupr = average_precision_score(y_true, y_score)
+                fpr95 = calc_fpr95(y_true, y_score)
+            except Exception:
+                continue
             
             results.append({
                 "model": "ResNet18",
@@ -188,8 +199,7 @@ def evaluate_representation(rep_name, rep_dir):
     return results
 
 def main():
-    print("Evaluating ANN Baselines...")
-    base_dir = Path("outputs/ann_features")
+    base_dir = cfg.ANN_DIR
     
     all_results = []
     for rep in ["event_image", "voxel_grid"]:
@@ -201,7 +211,7 @@ def main():
             
     if all_results:
         df = pd.DataFrame(all_results)
-        out_dir = Path("results")
+        out_dir = cfg.OUTPUT_DIR / "results"
         out_dir.mkdir(parents=True, exist_ok=True)
         df.to_csv(out_dir / "ann_baselines.csv", index=False)
         print(f"Results saved to {out_dir / 'ann_baselines.csv'}")

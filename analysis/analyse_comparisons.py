@@ -364,29 +364,44 @@ def run_severity_regression(all_phi):
         all_X.append(c_X)
         all_y.append(c_y)
         
+        # Need at least 2 samples to split
+        if len(c_X) < 2:
+            print(f"  {c_name:<25} (skipped: only {len(c_X)} sample)")
+            continue
+
+        test_size = max(1, int(0.3 * len(c_X)))
+        train_size = len(c_X) - test_size
+        if train_size < 1:
+            print(f"  {c_name:<25} (skipped: too few samples to split)")
+            continue
+
         X_train, X_test, y_train, y_test = train_test_split(c_X, c_y, test_size=0.3, random_state=42)
         model = Ridge(alpha=1.0)
         model.fit(X_train, y_train)
         preds = model.predict(X_test)
         
-        r2 = r2_score(y_test, preds)
-        mse = mean_squared_error(y_test, preds)
-        print(f"  {c_name:<25} R^2 = {r2:+.4f} | MSE = {mse:.4f}")
-        rows.append({"Scope": c_name, "R2": round(r2, 4), "MSE": round(mse, 4)})
+        if len(np.unique(y_test)) < 2:
+            # Cannot compute meaningful r2 with one class
+            r2, mse = float("nan"), float("nan")
+        else:
+            r2 = r2_score(y_test, preds)
+            mse = mean_squared_error(y_test, preds)
+        print(f"  {c_name:<25} R^2 = {r2 if not np.isnan(r2) else 'N/A':>8}  MSE = {mse if not np.isnan(mse) else 'N/A'}")
+        rows.append({"Scope": c_name, "R2": round(r2, 4) if not np.isnan(r2) else "", "MSE": round(mse, 4) if not np.isnan(mse) else ""})
         
     if all_X:
         all_X = np.concatenate(all_X, axis=0)
         all_y = np.concatenate(all_y, axis=0)
         
-        X_train, X_test, y_train, y_test = train_test_split(all_X, all_y, test_size=0.3, random_state=42)
-        model = Ridge(alpha=1.0)
-        model.fit(X_train, y_train)
-        preds = model.predict(X_test)
-        
-        r2 = r2_score(y_test, preds)
-        mse = mean_squared_error(y_test, preds)
-        print(f"  {'Overall (All Corruptions)':<25} R^2 = {r2:+.4f} | MSE = {mse:.4f}")
-        rows.append({"Scope": "Overall", "R2": round(r2, 4), "MSE": round(mse, 4)})
+        if len(all_X) >= 2:
+            X_train, X_test, y_train, y_test = train_test_split(all_X, all_y, test_size=0.3, random_state=42)
+            model = Ridge(alpha=1.0)
+            model.fit(X_train, y_train)
+            preds = model.predict(X_test)
+            r2 = r2_score(y_test, preds) if len(np.unique(y_test)) > 1 else float("nan")
+            mse = mean_squared_error(y_test, preds)
+            print(f"  {'Overall (All Corruptions)':<25} R^2 = {r2 if not np.isnan(r2) else 'N/A':>8}  MSE = {mse:.4f}")
+            rows.append({"Scope": "Overall", "R2": round(r2, 4) if not np.isnan(r2) else "", "MSE": round(mse, 4)})
         
         with open(TABLE_DIR / "severity_regression.csv", "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=["Scope", "R2", "MSE"])
@@ -422,7 +437,19 @@ def run_corruption_classification(all_phi):
     X = np.concatenate(X_list, axis=0)
     y = np.concatenate(y_list, axis=0)
     
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42, stratify=y)
+    # Guard: need at least 2 samples per class to stratify
+    unique_classes, counts = np.unique(y, return_counts=True)
+    if len(X) < 4 or any(c < 2 for c in counts):
+        print("  Skipping: not enough samples per class for classification.")
+        return
+
+    try:
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.3, random_state=42, stratify=y)
+    except ValueError:
+        # Fallback to non-stratified split
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.3, random_state=42)
     
     model = LogisticRegression(max_iter=1000, random_state=42)
     model.fit(X_train, y_train)

@@ -1,11 +1,20 @@
 import pandas as pd
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from vmem_benchmark import benchmark_config as cfg
+
+def safe_read_csv(path):
+    if not path.exists() or path.stat().st_size == 0:
+        return None
+    try:
+        return pd.read_csv(path)
+    except (pd.errors.EmptyDataError, pd.errors.ParserError):
+        return None
 
 def generate_table(df_path, out_path, index=False, caption=""):
-    if not df_path.exists():
-        return
-    df = pd.read_csv(df_path)
-    if df.empty:
+    df = safe_read_csv(df_path)
+    if df is None or df.empty:
         return
         
     latex_str = df.to_latex(index=index, float_format="%.3f")
@@ -17,8 +26,8 @@ def generate_table(df_path, out_path, index=False, caption=""):
 
 def main():
     print("Building paper tables...")
-    res_dir = Path("results")
-    out_dir = Path("paper_tables")
+    res_dir = cfg.OUTPUT_DIR / "results"
+    out_dir = cfg.OUTPUT_DIR / "paper_tables"
     out_dir.mkdir(parents=True, exist_ok=True)
     
     # Table 1: OOD
@@ -52,8 +61,8 @@ def main():
     try:
         # Load the 3 tables if they exist
         dfs = []
-        if (res_dir / "ood_metrics.csv").exists():
-            df_ood = pd.read_csv(res_dir / "ood_metrics.csv")
+        df_ood = safe_read_csv(res_dir / "ood_metrics.csv")
+        if df_ood is not None:
             # We assume model="Membrane", representation is implicit or based on filename if we merged them.
             # Wait, ood_metrics.csv has ['detector', 'corruption', 'severity', 'auroc', 'aupr', 'fpr95']
             # We aggregate across corruptions/severities.
@@ -62,8 +71,8 @@ def main():
             df_ood_agg["Representation"] = "membrane_fused (or specified)"
             dfs.append(df_ood_agg)
             
-        if (res_dir / "ann_baselines.csv").exists():
-            df_ann = pd.read_csv(res_dir / "ann_baselines.csv")
+        df_ann = safe_read_csv(res_dir / "ann_baselines.csv")
+        if df_ann is not None:
             df_ann_agg = df_ann.groupby(["model", "representation", "detector"]).mean(numeric_only=True).reset_index()
             df_ann_agg.rename(columns={"model": "Method", "representation": "Representation"}, inplace=True)
             dfs.append(df_ann_agg)
@@ -72,8 +81,8 @@ def main():
             combined = pd.concat(dfs, ignore_index=True)
             
             # Now load Severity >= 3 metrics to join
-            if (res_dir / "severity3plus_metrics.csv").exists():
-                df_sev = pd.read_csv(res_dir / "severity3plus_metrics.csv")
+            df_sev = safe_read_csv(res_dir / "severity3plus_metrics.csv")
+            if df_sev is not None:
                 # sev3plus_metrics has ['detector', 'severity_group', 'auroc', 'aupr', 'fpr95']
                 df_sev = df_sev.rename(columns={"auroc": "Severity>=3 AUROC"})
                 # Merge on detector (for membrane). ANN doesn't have a separate sev>=3 evaluated right now, 

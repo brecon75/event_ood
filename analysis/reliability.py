@@ -88,9 +88,18 @@ def main():
             # We'll just correlate OOD score with the metric directly instead of degradation.
             degradation = -corr_det_metric # higher degradation = fewer boxes
             
-        spearman_rho, _ = spearmanr(ood_scores, degradation)
-        pearson_r, _ = pearsonr(ood_scores, degradation)
-        r2 = r2_score(degradation, ood_scores) # Note: R2 might be meaningless without linear mapping
+        # Guard: correlation functions require at least 2 samples and non-constant arrays
+        if len(ood_scores) < 2 or np.std(ood_scores) == 0 or np.std(degradation) == 0:
+            print(f"  Skipping {run_name}: insufficient variance for correlation.")
+            continue
+
+        try:
+            spearman_rho, _ = spearmanr(ood_scores, degradation)
+            pearson_r, _ = pearsonr(ood_scores, degradation)
+            r2 = r2_score(degradation, ood_scores)
+        except Exception as e:
+            print(f"  Skipping {run_name}: correlation failed ({e})")
+            continue
         
         # AURC (Area Under the Risk-Coverage Curve)
         # Sort by OOD score (uncertainty). Reject highest OOD scores first.
@@ -125,13 +134,13 @@ def main():
         })
         
     df = pd.DataFrame(results)
-    out_dir = Path("results")
+    out_dir = cfg.OUTPUT_DIR / "results"
     out_dir.mkdir(parents=True, exist_ok=True)
     df.to_csv(out_dir / "reliability_metrics.csv", index=False)
     
     # Plot Reliability Curve
     if not df.empty:
-        fig_dir = Path("figures")
+        fig_dir = cfg.OUTPUT_DIR / "figures"
         fig_dir.mkdir(parents=True, exist_ok=True)
         
         plt.figure(figsize=(10, 6))

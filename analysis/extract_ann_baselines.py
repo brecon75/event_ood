@@ -48,8 +48,8 @@ def main():
     resnet_vox = get_resnet_feature_extractor(in_channels=20).to(device)
     resnet_vox.eval()
     
-    out_dir_img = Path("outputs/ann_features/event_image")
-    out_dir_vox = Path("outputs/ann_features/voxel_grid")
+    out_dir_img = cfg.ANN_DIR / "event_image"
+    out_dir_vox = cfg.ANN_DIR / "voxel_grid"
     out_dir_img.mkdir(parents=True, exist_ok=True)
     out_dir_vox.mkdir(parents=True, exist_ok=True)
     

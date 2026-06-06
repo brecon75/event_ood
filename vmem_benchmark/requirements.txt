@@ -52,6 +52,7 @@ cupy-cuda12x==13.6.0               # GPU event-corruption processing (CUDA 12.x 
 # ------------------------------------------------------------------------------
 scikit-learn==1.8.0                # Machine learning algorithms
 matplotlib==3.10.9                 # Generation of heatmaps, sensitivity plots, and performance charts
+seaborn==0.13.2                    # Statistical data visualization (heatmaps, distributions, and plot styling)
 tqdm==4.67.3                       # Beautiful console progress bars for overall and per-sequence steps
 PyYAML==6.0.3                      # Safe YAML file loading and parsing
 

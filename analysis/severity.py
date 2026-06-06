@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+from tqdm import tqdm
 from pathlib import Path
 from scipy.stats import spearmanr
 import joblib
@@ -21,7 +22,7 @@ def main():
         print("Error: 'clean' run not found.")
         return
         
-    out_dir = Path("outputs/detectors")
+    out_dir = cfg.DETECTOR_DIR
     
     detectors = {}
     if out_dir.exists():
@@ -40,8 +41,7 @@ def main():
     # 1. Full membrane with all available fitted detectors
     # 2. All representations with Mahalanobis
     
-    for c_name in cfg.CORRUPTIONS:
-        print(f"Analyzing corruption: {c_name}")
+    for c_name in tqdm(cfg.CORRUPTIONS, desc="Severity analysis"):
         # Build lists of scores and severities
         
         # --- 1. All representations with Mahalanobis ---
@@ -120,13 +120,13 @@ def main():
                 })
                 
     df = pd.DataFrame(results)
-    res_dir = Path("results")
+    res_dir = cfg.OUTPUT_DIR / "results"
     res_dir.mkdir(parents=True, exist_ok=True)
     df.to_csv(res_dir / "severity_metrics.csv", index=False)
     
     # Plotting
     if not df.empty:
-        fig_dir = Path("figures")
+        fig_dir = cfg.OUTPUT_DIR / "figures"
         fig_dir.mkdir(parents=True, exist_ok=True)
         
         plt.figure(figsize=(12, 6))

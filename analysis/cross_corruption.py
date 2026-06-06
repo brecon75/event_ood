@@ -82,7 +82,7 @@ def main():
             })
             
     df = pd.DataFrame(results)
-    res_dir = Path("results")
+    res_dir = cfg.OUTPUT_DIR / "results"
     res_dir.mkdir(parents=True, exist_ok=True)
     df.to_csv(res_dir / "cross_corruption.csv", index=False)
     

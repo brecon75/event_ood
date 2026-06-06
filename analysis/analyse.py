@@ -17,7 +17,7 @@ from analysis.analyse_comparisons import (
     run_per_layer_auroc_table, run_statwise_ablation,
     run_detector_comparison, run_spearman_severity,
     save_full_results_table, run_severity_regression,
-    run_corruption_classification
+    run_corruption_classification, run_conformal_prediction
 )
 from analysis.analyse_temporal import run_temporal_analysis
 
@@ -35,7 +35,7 @@ def main():
     all_phi = LazyPhiDict()
 
     if not all_phi:
-        print("No results found in outputs/phi/. Run extract.py first.")
+        print(f"No results found in {cfg.PHI_DIR}. Run extract.py first.")
         sys.exit(1)
     if "clean" not in all_phi:
         print("ERROR: clean.pt missing from phi directory.")
@@ -68,11 +68,12 @@ def main():
         run_spearman_severity(all_phi)
         save_full_results_table(all_phi)
 
-    # ── Ideas 3, 5, 7: PCA, Severity Regression, and Classification ─────────
+    # ── Ideas 3, 5, 6, 7: PCA, Severity Regression, Classification, Conformal ──
     if n_corrupted > 0:
         plot_pca_subspaces(all_phi)
         run_severity_regression(all_phi)
         run_corruption_classification(all_phi)
+        run_conformal_prediction(all_phi)
 
     print(f"\nAnalysis complete.")
     print(f"  Plots  -> {cfg.PLOT_DIR}")

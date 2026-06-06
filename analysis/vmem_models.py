@@ -3,6 +3,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from tqdm import tqdm
 
 # Fix paths for imports
 _HERE = Path(__file__).resolve().parent
@@ -114,7 +115,8 @@ def train_flow_model(clean_pca, epochs=100, lr=1e-3, batch_size=128, device="cud
     dataset = torch.from_numpy(clean_pca).float()
     loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
     flow.train()
-    for _ in range(epochs):
+    pbar = tqdm(range(epochs), desc="Training Flow Model", leave=False, disable=epochs <= 1)
+    for _ in pbar:
         for batch in loader:
             batch = batch.to(device)
             optimizer.zero_grad()
@@ -134,7 +136,8 @@ def train_ae_model(clean_raw, epochs=40, lr=1e-3, batch_size=128, device="cuda")
     dataset = torch.from_numpy(clean_raw).float()
     loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
     ae.train()
-    for _ in range(epochs):
+    pbar = tqdm(range(epochs), desc="Training Autoencoder", leave=False, disable=epochs <= 1)
+    for _ in pbar:
         for batch in loader:
             batch = batch.to(device)
             optimizer.zero_grad()
@@ -161,12 +164,16 @@ def train_temporal_ae_model(clean_trajs, epochs=200, lr=1e-3, device="cuda"):
     fast_mode = "--fast" in sys.argv
     if fast_mode:
         epochs = min(epochs, 2)
-    clean_x = prepare_temporal_ae_input(clean_trajs)
+    if isinstance(clean_trajs, torch.Tensor):
+        clean_x = clean_trajs
+    else:
+        clean_x = prepare_temporal_ae_input(clean_trajs)
     ae = TemporalAutoencoder(dim=clean_x.shape[2]).to(device)
     optimizer = optim.Adam(ae.parameters(), lr=lr)
     dataset = clean_x.to(device)
     ae.train()
-    for _ in range(epochs):
+    pbar = tqdm(range(epochs), desc="Training Temporal AE", leave=False, disable=epochs <= 1)
+    for _ in pbar:
         optimizer.zero_grad()
         recon = ae(dataset)
         loss = nn.MSELoss()(recon, dataset)

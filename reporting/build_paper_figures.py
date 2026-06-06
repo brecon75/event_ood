@@ -3,11 +3,22 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
 import numpy as np
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from vmem_benchmark import benchmark_config as cfg
+
+def safe_read_csv(path):
+    if not path.exists() or path.stat().st_size == 0:
+        return None
+    try:
+        return pd.read_csv(path)
+    except (pd.errors.EmptyDataError, pd.errors.ParserError):
+        return None
 
 def setup():
-    out_dir = Path("paper_figures")
+    out_dir = cfg.OUTPUT_DIR / "paper_figures"
     out_dir.mkdir(parents=True, exist_ok=True)
-    res_dir = Path("results")
+    res_dir = cfg.OUTPUT_DIR / "results"
     return res_dir, out_dir
 
 def plot_fig1(res_dir, out_dir):
@@ -31,9 +42,8 @@ def plot_fig2(res_dir, out_dir):
 
 def plot_fig3(res_dir, out_dir):
     df_path = res_dir / "representation_metrics.csv"
-    if not df_path.exists(): return
-    df = pd.read_csv(df_path)
-    if df.empty: return
+    df = safe_read_csv(df_path)
+    if df is None or df.empty: return
     
     plt.figure(figsize=(10, 6))
     sns.boxplot(data=df, x="representation", y="auroc")
@@ -45,9 +55,8 @@ def plot_fig3(res_dir, out_dir):
 
 def plot_fig4(res_dir, out_dir):
     df_path = res_dir / "severity_metrics.csv"
-    if not df_path.exists(): return
-    df = pd.read_csv(df_path)
-    if df.empty: return
+    df = safe_read_csv(df_path)
+    if df is None or df.empty: return
     
     plt.figure(figsize=(10, 6))
     sns.barplot(data=df, x="detector", y="rho", hue="representation")
@@ -58,9 +67,8 @@ def plot_fig4(res_dir, out_dir):
 
 def plot_fig5(res_dir, out_dir):
     df_path = res_dir / "reliability_metrics.csv"
-    if not df_path.exists(): return
-    df = pd.read_csv(df_path)
-    if df.empty: return
+    df = safe_read_csv(df_path)
+    if df is None or df.empty: return
     
     plt.figure(figsize=(8, 6))
     sns.lineplot(data=df, x="severity", y="aurc", marker="o", hue="corruption")
@@ -71,9 +79,8 @@ def plot_fig5(res_dir, out_dir):
 
 def plot_fig6(res_dir, out_dir):
     df_path = res_dir / "cross_corruption.csv"
-    if not df_path.exists(): return
-    df = pd.read_csv(df_path)
-    if df.empty: return
+    df = safe_read_csv(df_path)
+    if df is None or df.empty: return
     
     plt.figure(figsize=(10, 6))
     sns.barplot(data=df, x="eval_corruption", y="auroc", hue="severity")
@@ -85,7 +92,8 @@ def plot_fig6(res_dir, out_dir):
 
 def plot_fig7(res_dir, out_dir):
     df_path = res_dir / "model_comparison.csv"
-    if not df_path.exists():
+    df = safe_read_csv(df_path)
+    if df is None or df.empty:
         # placeholder
         fig, ax = plt.subplots(figsize=(8, 6))
         ax.text(0.5, 0.5, 'Figure 7: Model Comparison\n(No data yet)', 
@@ -94,9 +102,6 @@ def plot_fig7(res_dir, out_dir):
         plt.savefig(out_dir / "fig7_model_comparison.pdf")
         plt.close()
         return
-        
-    df = pd.read_csv(df_path)
-    if df.empty: return
     
     plt.figure(figsize=(8, 6))
     sns.barplot(data=df, x="model", y="auroc")
@@ -107,9 +112,8 @@ def plot_fig7(res_dir, out_dir):
 
 def plot_fig_severity3plus(res_dir, out_dir):
     df_path = res_dir / "severity3plus_metrics.csv"
-    if not df_path.exists(): return
-    df = pd.read_csv(df_path)
-    if df.empty: return
+    df = safe_read_csv(df_path)
+    if df is None or df.empty: return
     
     plt.figure(figsize=(10, 6))
     sns.barplot(data=df, x="detector", y="auroc")
@@ -122,13 +126,12 @@ def plot_fig_severity3plus(res_dir, out_dir):
 def plot_ann_comparison(res_dir, out_dir):
     ann_path = res_dir / "ann_baselines.csv"
     ood_path = res_dir / "ood_metrics.csv"
-    if not ann_path.exists() or not ood_path.exists(): return
     
-    ann_df = pd.read_csv(ann_path)
-    ood_df = pd.read_csv(ood_path)
+    ann_df = safe_read_csv(ann_path)
+    ood_df = safe_read_csv(ood_path)
     
     # We want to compare the best ANN baseline vs our best membrane representations
-    if ann_df.empty or ood_df.empty: return
+    if ann_df is None or ood_df is None or ann_df.empty or ood_df.empty: return
     
     # Just take overall mean AUROC per method/representation
     ann_agg = ann_df.groupby(["representation", "detector"])["auroc"].mean().reset_index()

@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 import joblib
+from tqdm import tqdm
 from pathlib import Path
 from sklearn.covariance import EmpiricalCovariance
 from sklearn.neighbors import NearestNeighbors
@@ -33,16 +34,18 @@ class SimpleAE(nn.Module):
         return self.decoder(self.encoder(x))
         
 def fit_ae(X, epochs=50, lr=1e-3):
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     input_dim = X.shape[1]
-    model = SimpleAE(input_dim)
+    model = SimpleAE(input_dim).to(device)
     optimizer = optim.Adam(model.parameters(), lr=lr)
     criterion = nn.MSELoss()
     
-    X_tensor = torch.tensor(X, dtype=torch.float32)
+    X_tensor = torch.tensor(X, dtype=torch.float32).to(device)
     dataset = torch.utils.data.TensorDataset(X_tensor)
     loader = torch.utils.data.DataLoader(dataset, batch_size=256, shuffle=True)
     
-    for epoch in range(epochs):
+    pbar = tqdm(range(epochs), desc="Training Autoencoder (fit)", leave=False)
+    for epoch in pbar:
         for batch in loader:
             x = batch[0]
             optimizer.zero_grad()
@@ -51,7 +54,7 @@ def fit_ae(X, epochs=50, lr=1e-3):
             loss.backward()
             optimizer.step()
             
-    return model
+    return model.cpu()
 
 def main():
     print("Fitting detectors on clean data...")
@@ -67,7 +70,7 @@ def main():
         print("Warning: membrane_fused not found, falling back to full_membrane")
         X_train = extract_representation(all_feats['clean'], 'full_membrane')
     
-    out_dir = Path("outputs/detectors")
+    out_dir = cfg.DETECTOR_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
     
     detectors = {}
@@ -84,12 +87,14 @@ def main():
     detectors['pca'] = pca
     
     print("Fitting kNN...")
-    knn = NearestNeighbors(n_neighbors=5).fit(X_train)
+    k_nn = min(5, X_train.shape[0])  # clamp k to available samples
+    knn = NearestNeighbors(n_neighbors=k_nn).fit(X_train)
     detectors['knn'] = knn
     
     print("Fitting GMM...")
     try:
-        gmm = GaussianMixture(n_components=5, covariance_type='diag').fit(X_train)
+        n_comp = min(5, X_train.shape[0])  # clamp components to available samples
+        gmm = GaussianMixture(n_components=n_comp, covariance_type='diag').fit(X_train)
         detectors['gmm'] = gmm
     except Exception as e:
         print(f"GMM failed: {e}")

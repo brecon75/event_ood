@@ -24,18 +24,27 @@ def load_all_features():
         feats[run_name]["membrane_stats"] = d["phi"].numpy()
         
         # margin hist
-        mh_path = Path("outputs/features/margin_hist") / f"{run_name}.pt"
+        mh_path = cfg.OUTPUT_DIR / "features/margin_hist" / f"{run_name}.pt"
         if mh_path.exists():
             feats[run_name]["membrane_margin_hist"] = torch.load(mh_path, weights_only=True, map_location="cpu")["margin_hist"].numpy()
             
         # trajectory latent
-        tl_path = Path("outputs/features/trajectory_latent") / f"{run_name}.pt"
+        tl_path = cfg.OUTPUT_DIR / "features/trajectory_latent" / f"{run_name}.pt"
         if tl_path.exists():
             feats[run_name]["membrane_temporal_latent"] = torch.load(tl_path, weights_only=True, map_location="cpu")["trajectory_latent"].numpy()
             
-        # load temporal features from analysis.legacy_utils
-        from analysis.vmem_utils import load_traj_as_temporal_phi
-        tf = load_traj_as_temporal_phi(run_name)
+        # load temporal features
+        tphi_path = cfg.TEMPORAL_PHI_DIR / f"{run_name}.pt"
+        tf = None
+        if tphi_path.exists():
+            try:
+                tf = torch.load(tphi_path, weights_only=True, map_location="cpu")["temporal_phi"].float().numpy()
+            except Exception:
+                pass
+        if tf is None:
+            from analysis.vmem_utils import load_traj_as_temporal_phi
+            tf = load_traj_as_temporal_phi(run_name)
+            
         if tf is not None:
             feats[run_name]["membrane_temporal"] = tf
             
@@ -59,7 +68,7 @@ def align_and_concat(feat_dict, keys):
 def main():
     print("Running Trainable Layer Fusion and Unified Representation Extraction...")
     
-    out_dir = Path("outputs/features/fused")
+    out_dir = cfg.OUTPUT_DIR / "features/fused"
     out_dir.mkdir(parents=True, exist_ok=True)
     
     feats = load_all_features()
@@ -157,9 +166,9 @@ def main():
         # Save fused features
         torch.save(
             {
-                "layer_fused_stats": run_feats.get("layer_fused_stats"),
-                "layer_score_fusion": run_feats.get("layer_score_fusion"),
-                "membrane_fused": run_feats.get("membrane_fused")
+                "layer_fused_stats": torch.from_numpy(run_feats.get("layer_fused_stats")) if run_feats.get("layer_fused_stats") is not None else None,
+                "layer_score_fusion": torch.from_numpy(run_feats.get("layer_score_fusion")) if run_feats.get("layer_score_fusion") is not None else None,
+                "membrane_fused": torch.from_numpy(run_feats.get("membrane_fused")) if run_feats.get("membrane_fused") is not None else None
             },
             out_dir / f"{run_name}.pt"
         )

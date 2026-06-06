@@ -9,7 +9,8 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent))
 from vmem_benchmark import benchmark_config as cfg
-from analysis.vmem_utils import LAYER_SPECS, _get_present, mahalanobis_scorer, auroc_fpr95
+from analysis.vmem_utils import LAYER_SPECS, _get_present, auroc_fpr95
+from analysis.vmem_scorers import mahalanobis_scorer
 from sklearn.decomposition import PCA
 
 def plot_sensitivity_heatmap(all_phi):
@@ -100,7 +101,8 @@ def plot_all_trajectories(n_samples=8):
             ax.plot(clean_means[li], color="black", lw=2, ls="--", label="clean")
             for sev in cfg.SEVERITIES:
                 if sev in corr_means[li][c_name]:
-                    ax.plot(corr_means[li][c_name][sev], color=colors[sev - 1], label=f"L{sev}", alpha=0.8)
+                    sev_idx = cfg.SEVERITIES.index(sev)
+                    ax.plot(corr_means[li][c_name][sev], color=colors[sev_idx], label=f"L{sev}", alpha=0.8)
             ax.set_title(f"Layer {li} - Corruption: {c_name}")
             ax.set_ylabel("Mean V(t)")
             ax.legend(loc="upper right", ncol=3, fontsize=7)
@@ -325,4 +327,34 @@ def plot_corruption_confusion_matrix(y_true, y_pred, target_names):
     plt.savefig(cfg.PLOT_DIR / "corruption_confusion_matrix.pdf")
     plt.close()
     print("  Saved corruption_confusion_matrix.pdf")
+
+
+def plot_free_rider_ablation(results):
+    cfg.PLOT_DIR.mkdir(parents=True, exist_ok=True)
+    conditions = list(results.keys())
+    
+    x = np.arange(len(conditions))
+    width = 0.35
+    
+    fig, ax = plt.subplots(figsize=(8, 5))
+    
+    vals_hot = [results[cond]['hot_pixel'] for cond in conditions]
+    vals_flood = [results[cond]['event_flood'] for cond in conditions]
+    
+    ax.bar(x - width/2, vals_hot, width, label='hot_pixel_L5', color='#C44E52')
+    ax.bar(x + width/2, vals_flood, width, label='event_flood_L5', color='#4C72B0')
+    
+    ax.set_ylabel('OOD Detection AUROC')
+    ax.set_title('Free Rider Ablation: SNN Representations vs Baselines')
+    ax.set_xticks(x)
+    ax.set_xticklabels(conditions)
+    ax.legend(loc='lower right')
+    ax.set_ylim(0, 1.05)
+    ax.grid(axis='y', alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(cfg.PLOT_DIR / "free_rider_ablation.pdf")
+    plt.close()
+    print("  Saved free_rider_ablation.pdf")
+
 

@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+from tqdm import tqdm
 from pathlib import Path
 from sklearn.covariance import EmpiricalCovariance
 from sklearn.metrics import roc_auc_score, average_precision_score, roc_curve
@@ -10,7 +11,6 @@ from sklearn.metrics import roc_auc_score, average_precision_score, roc_curve
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vmem_benchmark import benchmark_config as cfg
-from experiment_registry import log_experiment
 
 def calc_fpr95(y_true, y_score):
     fpr, tpr, thresholds = roc_curve(y_true, y_score)
@@ -35,26 +35,36 @@ def load_all_features():
     phi = {f.stem: torch.load(f, weights_only=True)['phi'].numpy() for f in cfg.PHI_DIR.glob("*.pt")}
     
     ann = {}
-    for f in cfg.ANN_DIR.glob("*.pt"):
-        ann[f.stem] = {k: v.numpy() for k, v in torch.load(f, weights_only=True).items()}
+    if cfg.ANN_DIR.exists():
+        for f in cfg.ANN_DIR.glob("*.pt"):
+            ann[f.stem] = {k: v.numpy() for k, v in torch.load(f, weights_only=True).items()}
         
     spike = {}
-    for f in cfg.SPIKE_DIR.glob("*.pt"):
-        spike[f.stem] = {k: v.numpy() for k, v in torch.load(f, weights_only=True).items()}
+    if cfg.SPIKE_DIR.exists():
+        for f in cfg.SPIKE_DIR.glob("*.pt"):
+            spike[f.stem] = {k: v.numpy() for k, v in torch.load(f, weights_only=True).items()}
         
     # we don't necessarily have all representations for all runs if a run failed
-    valid_runs = set(phi.keys()).intersection(ann.keys()).intersection(spike.keys())
+    valid_runs = set(phi.keys())
+    if ann:
+        valid_runs = valid_runs.intersection(ann.keys())
+    if spike:
+        valid_runs = valid_runs.intersection(spike.keys())
     
-    fused_dir = Path("outputs/features/fused")
+    fused_dir = cfg.OUTPUT_DIR / "features/fused"
     fused = {}
     if fused_dir.exists():
         for f in fused_dir.glob("*.pt"):
             d = torch.load(f, weights_only=True, map_location="cpu")
-            fused[f.stem] = {k: v for k, v in d.items() if v is not None}
+            fused[f.stem] = {k: (v.numpy() if isinstance(v, torch.Tensor) else v) for k, v in d.items() if v is not None}
             
     res = {}
     for run in valid_runs:
-        res[run] = {'phi': phi[run], 'ann': ann[run], 'spike': spike[run]}
+        res[run] = {
+            'phi': phi[run],
+            'ann': ann.get(run, {}),
+            'spike': spike.get(run, {})
+        }
         if run in fused:
             res[run]['fused'] = fused[run]
             
@@ -87,9 +97,9 @@ def extract_representation(feats, rep_name):
         return feats['ann'].get('head_cls_L0_gap')
     elif rep_name == "spike":
         # Let's use spike_rate
-        return feats['spike'].get('spike_rate')
+        return feats.get('spike', {}).get('spike_rate')
     elif rep_name == "spike_entropy":
-        return feats['spike'].get('spike_entropy')
+        return feats.get('spike', {}).get('spike_entropy')
     elif rep_name == "membrane_fused" and 'fused' in feats:
         return feats['fused'].get('membrane_fused')
     
@@ -110,8 +120,7 @@ def main():
     
     results = []
     
-    for rep in reps:
-        print(f"Evaluating {rep}...")
+    for rep in tqdm(reps, desc="Representation Ablation"):
         train_feat = extract_representation(all_feats['clean'], rep)
         if train_feat is None:
             print(f"Skipping {rep} (not found)")
@@ -135,9 +144,14 @@ def main():
             y_true = np.concatenate([np.zeros(len(clean_scores)), np.ones(len(corr_scores))])
             y_score = np.concatenate([clean_scores, corr_scores])
             
-            auroc = roc_auc_score(y_true, y_score)
-            aupr = average_precision_score(y_true, y_score)
-            fpr95 = calc_fpr95(y_true, y_score)
+            if len(np.unique(y_true)) < 2:
+                continue
+            try:
+                auroc = roc_auc_score(y_true, y_score)
+                aupr = average_precision_score(y_true, y_score)
+                fpr95 = calc_fpr95(y_true, y_score)
+            except Exception:
+                continue
             
             parts = run_name.rsplit('_L', 1)
             corruption = parts[0]
@@ -154,10 +168,9 @@ def main():
                 "fpr95": fpr95
             }
             results.append(res_dict)
-            log_experiment(res_dict)
             
     df = pd.DataFrame(results)
-    out_dir = Path("results")
+    out_dir = cfg.OUTPUT_DIR / "results"
     out_dir.mkdir(parents=True, exist_ok=True)
     df.to_csv(out_dir / "representation_metrics.csv", index=False)
     
@@ -169,7 +182,7 @@ def main():
         plt.title("AUROC by Representation and Severity (Averaged across Corruptions)")
         plt.tight_layout()
         
-        fig_dir = Path("figures")
+        fig_dir = cfg.OUTPUT_DIR / "figures"
         fig_dir.mkdir(parents=True, exist_ok=True)
         plt.savefig(fig_dir / "representation_heatmap.pdf")
         plt.close()

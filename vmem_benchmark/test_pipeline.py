@@ -64,6 +64,16 @@ def run_tests():
     print("VMEM BENCHMARK - ALL-ENCOMPASSING TEST SUITE")
     print("=" * 80)
 
+    # ── CUDA Device Check ─────────────────────────────────────────────────────
+    cuda_avail = torch.cuda.is_available()
+    configured_device = cfg.DEVICE
+    print(f"[CUDA Status] PyTorch CUDA available: {cuda_avail}")
+    print(f"[CUDA Status] Configured device: {configured_device}")
+    if configured_device == "cuda" and cuda_avail:
+        print("[CUDA Status] CUDA is active and will be used for GPU acceleration.")
+    else:
+        print("[CUDA Status] WARNING: CUDA is NOT active or NOT available; running tests on CPU.")
+
     # ---------------------------------------------------------
     # 1. Test Model Loading
     # ---------------------------------------------------------

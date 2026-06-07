@@ -37,3 +37,8 @@ vmem_benchmark/.venv/
 # Live logs & temporary backups
 test_pipeline_live.log
 vmem_benchmark/benchmark_config.py.bak
+
+# Test pipelines & run logs
+run_test_pipeline.ps1
+run_test_pipeline.sh
+log.txt

@@ -78,3 +78,8 @@ SEVERITIES = [1, 2, 3, 4, 5]
 
 # Gen1 split to benchmark against
 SPLIT = "test"
+
+# --- TEMPORARY TEST OVERRIDES ---
+MAX_SEQUENCES = 1
+CORRUPTIONS = ["hot_pixel", "event_flood"]
+SEVERITIES = [5]

@@ -115,6 +115,9 @@ def main():
         else:
             cmd_args.extend(["--device", "cpu"])
             
+        if w_idx > 0:
+            cmd_args.append("--skip-clean")
+            
         # Set environment variables for this worker (e.g. CUDA_VISIBLE_DEVICES)
         env = os.environ.copy()
         if worker["gpu_id"] is not None:

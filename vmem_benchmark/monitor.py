@@ -29,6 +29,7 @@ class VmemMonitor:
         selected : list of PLIF indices to hook (0-indexed). None hooks all.
         """
         self._v: Dict[int, List[torch.Tensor]] = {}
+        self._spikes: Dict[int, List[torch.Tensor]] = {}
         self._hooks = []
         self._selected = selected
 
@@ -37,6 +38,7 @@ class VmemMonitor:
             if isinstance(module, MultiStepParametricLIFNode):
                 if selected is None or idx in selected:
                     self._v[idx] = []
+                    self._spikes[idx] = []
                     self._hooks.append(
                         module.register_forward_hook(self._make_hook(idx))
                     )
@@ -70,15 +72,73 @@ class VmemMonitor:
                 return
 
             self._v[idx].append(v)  # each entry: (T, B, C, H, W)
+
+            if isinstance(output, torch.Tensor):
+                spikes = output.detach().float()
+                if spikes.ndim == 4:
+                    spikes = spikes.unsqueeze(1)
+                elif spikes.ndim == 5:
+                    pass
+                else:
+                    return
+                self._spikes[idx].append(spikes)
         return hook
 
     # ------------------------------------------------------------------
     # State management
     # ------------------------------------------------------------------
     def reset(self):
-        """Clear all collected membrane potentials."""
+        """Clear all collected membrane potentials and spikes."""
         for k in self._v:
             self._v[k] = []
+        for k in self._spikes:
+            self._spikes[k] = []
+
+    # ------------------------------------------------------------------
+    # Spike features extraction
+    # ------------------------------------------------------------------
+    def collect_spikes(self) -> Dict[str, torch.Tensor]:
+        """
+        Compute spike_rate and spike_entropy per layer and channel.
+        Returns a dict with:
+          'spike_rate': (B, sum_C)
+          'spike_entropy': (B, sum_C)
+        """
+        rate_parts = []
+        entropy_parts = []
+        
+        for idx in sorted(self._spikes.keys()):
+            sp_list = self._spikes[idx]
+            if not sp_list:
+                continue
+            
+            # Concatenate list of batch tensors along dim 1 (batch)
+            S = torch.cat(sp_list, dim=1)  # (T, B, C, H, W)
+            p = S.mean(dim=(0, 3, 4))      # (B, C)
+            
+            # Compute binary entropy: H(p) = -p log2(p) - (1-p) log2(1-p)
+            p_clip = torch.clamp(p, min=1e-8, max=1-1e-8)
+            entropy = -p_clip * torch.log2(p_clip) - (1 - p_clip) * torch.log2(1 - p_clip)
+            
+            rate_parts.append(p.cpu())
+            entropy_parts.append(entropy.cpu())
+            
+        if not rate_parts:
+            # Handle empty case with correct device (cpu)
+            device = "cpu"
+            for k in self._spikes:
+                if self._spikes[k]:
+                    device = self._spikes[k][0].device
+                    break
+            return {
+                'spike_rate': torch.empty((0, 0), device=device),
+                'spike_entropy': torch.empty((0, 0), device=device)
+            }
+            
+        return {
+            'spike_rate': torch.cat(rate_parts, dim=-1),      # (B, sum_C)
+            'spike_entropy': torch.cat(entropy_parts, dim=-1) # (B, sum_C)
+        }
 
     # ------------------------------------------------------------------
     # Phi extraction (B, 3*sum_C)

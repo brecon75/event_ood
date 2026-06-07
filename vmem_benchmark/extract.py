@@ -72,6 +72,7 @@ def resolve_defaults_and_args():
     parser.add_argument("--plif-layers", type=int, nargs="+", help="PLIF layers to monitor (e.g. 0 1 2 3). Omit to hook all.")
     parser.add_argument("--input-dir", type=str, help="Direct path to the directory containing sequence folders (bypasses --gen1-root and --split)")
     parser.add_argument("--vram-fraction", type=float, default=1.0, help="Fraction of GPU VRAM PyTorch is allowed to allocate (0.0 to 1.0). Set to 1.0 for unlimited.")
+    parser.add_argument("--skip-clean", action="store_true", help="Skip running the clean/baseline run")
     
     
     # We parse known args so it doesn't break if run inside environment frameworks with extra args
@@ -210,6 +211,7 @@ def resolve_defaults_and_args():
     if args.plif_layers is not None:
         cfg.PLIF_LAYERS = args.plif_layers
     cfg.VRAM_FRACTION = args.vram_fraction
+    cfg.SKIP_CLEAN = args.skip_clean
 
 
     # Dynamically inject resolved HybridDetection and event_corruption to sys.path
@@ -328,7 +330,9 @@ def run_benchmark():
         print(f"[cap] Capped to {len(seq_dirs)} sequences (MAX_SEQUENCES={max_seq}).")
 
     # 4. Define Runs (Clean + Corruptions)
-    runs = [("clean", None, 0)]
+    runs = []
+    if not getattr(cfg, "SKIP_CLEAN", False):
+        runs.append(("clean", None, 0))
     for c_name in cfg.CORRUPTIONS:
         for sev in cfg.SEVERITIES:
             runs.append((f"{c_name}_L{sev}", c_name, sev))
@@ -420,6 +424,9 @@ def run_benchmark():
             seq_asab_gap_cpu = []
             seq_last_ann_gap_cpu = []
             seq_head_cls_L0_gap_cpu = []
+            seq_spike_rate_cpu = []
+            seq_spike_entropy_cpu = []
+            seq_det_outputs_cpu = []
             seq_traj_cpu = {l: [] for l in range(4)}  # Max 4 layers
 
             for j in range(0, n_frames, cfg.BATCH_SIZE):
@@ -453,6 +460,31 @@ def run_benchmark():
                     head_cls_L0_gap = cls_output.mean(dim=(2, 3)).cpu()
                     seq_head_cls_L0_gap_cpu.append(head_cls_L0_gap)
 
+                    # Run downstream YOLOX detection head to get predictions (B, anchors, 7)
+                    predictions, _ = module.mdl.forward_detect(backbone_features=backbone_features)
+                    # Extract for batch size 1
+                    obj_conf = predictions[0, :, 4]
+                    cls_conf, _ = predictions[0, :, 5:].max(dim=-1)
+                    scores = obj_conf * cls_conf  # (anchors,)
+                    
+                    # Filter anchors with score > 0.05
+                    mask = scores > 0.05
+                    filtered_pred = predictions[0, mask]  # (K, 7)
+                    
+                    # Sort and keep top 100 anchors
+                    if len(filtered_pred) > 0:
+                        f_scores = scores[mask]
+                        sort_idx = torch.argsort(f_scores, descending=True)
+                        filtered_pred = filtered_pred[sort_idx[:100]]
+                    
+                    # Pad to fixed size (100, 7)
+                    K = len(filtered_pred)
+                    padded_pred = torch.zeros((100, 7), device=predictions.device)
+                    if K > 0:
+                        padded_pred[:K] = filtered_pred
+                        
+                    seq_det_outputs_cpu.append(padded_pred.unsqueeze(0).cpu())
+
                 # Collect phi for this batch (KEEP ON GPU to prevent blocking sync)
                 phi_batch = monitor.collect_phi()
                 if phi_batch.numel() > 0:
@@ -467,6 +499,12 @@ def run_benchmark():
                 tgap_batch = monitor.collect_temporal_gap()
                 if tgap_batch.numel() > 0:
                     seq_temporal_gap_cpu.append(tgap_batch)
+
+                # Collect spike stats online
+                sp_stats = monitor.collect_spikes()
+                if sp_stats['spike_rate'].numel() > 0:
+                    seq_spike_rate_cpu.append(sp_stats['spike_rate'])
+                    seq_spike_entropy_cpu.append(sp_stats['spike_entropy'])
 
                 # Collect trajectory snapshots
                 if n_trajs_saved < cfg.TRAJ_SAVE_N:
@@ -523,6 +561,28 @@ def run_benchmark():
                 gc.collect()
 
                 
+            # Save sequence spike stats online
+            if seq_spike_rate_cpu:
+                sp_rate_seq = torch.cat(seq_spike_rate_cpu, dim=0)
+                sp_ent_seq = torch.cat(seq_spike_entropy_cpu, dim=0)
+                spike_tmp_dir = cfg.SPIKE_DIR / f"_tmp_{run_name}"
+                spike_tmp_dir.mkdir(parents=True, exist_ok=True)
+                torch.save({
+                    'spike_rate': sp_rate_seq,
+                    'spike_entropy': sp_ent_seq
+                }, spike_tmp_dir / f"seq_{i:05d}.pt")
+                del sp_rate_seq, sp_ent_seq
+                gc.collect()
+
+            # Save sequence detector outputs online
+            if seq_det_outputs_cpu:
+                det_seq = torch.cat(seq_det_outputs_cpu, dim=0)
+                det_tmp_dir = cfg.DETECTOR_DIR / f"_tmp_{run_name}"
+                det_tmp_dir.mkdir(parents=True, exist_ok=True)
+                torch.save(det_seq, det_tmp_dir / f"seq_{i:05d}.pt")
+                del det_seq
+                gc.collect()
+                
             for l_idx, tensor_list in seq_traj_cpu.items():
                 if tensor_list:
                     if l_idx not in traj_bank:
@@ -531,7 +591,7 @@ def run_benchmark():
                     traj_bank[l_idx].append(torch.cat(tensor_list, dim=1))
 
             # --- 5. Aggressive Memory Cleanup ---
-            del hist_torch_cpu, seq_phi_gpu, seq_traj_cpu, seq_asab_gap_cpu, seq_last_ann_gap_cpu, seq_head_cls_L0_gap_cpu
+            del hist_torch_cpu, seq_phi_gpu, seq_traj_cpu, seq_asab_gap_cpu, seq_last_ann_gap_cpu, seq_head_cls_L0_gap_cpu, seq_spike_rate_cpu, seq_spike_entropy_cpu, seq_det_outputs_cpu
             gc.collect()
             if cfg.DEVICE == "cuda":
                 torch.cuda.empty_cache()
@@ -632,6 +692,43 @@ def run_benchmark():
                         f.unlink()
                     if not any(ann_tmp_dir.iterdir()):
                         ann_tmp_dir.rmdir()
+
+            # --- Merge spike tmp files ---
+            spike_tmp_dir = cfg.SPIKE_DIR / f"_tmp_{run_name}"
+            if spike_tmp_dir.exists():
+                spike_files = sorted(spike_tmp_dir.glob("seq_*.pt"))
+                if spike_files:
+                    parts = [torch.load(f, weights_only=True) for f in spike_files]
+                    sp_rate_final = torch.cat([p['spike_rate'] for p in parts], dim=0)
+                    sp_ent_final = torch.cat([p['spike_entropy'] for p in parts], dim=0)
+                    cfg.SPIKE_DIR.mkdir(parents=True, exist_ok=True)
+                    torch.save({
+                        'spike_rate': sp_rate_final,
+                        'spike_entropy': sp_ent_final
+                    }, cfg.SPIKE_DIR / f"{run_name}.pt")
+                    overall_pbar.write(f"  Saved spike stats: {sp_rate_final.shape} -> {run_name}.pt")
+                    del sp_rate_final, sp_ent_final, parts
+                    for f in spike_files:
+                        f.unlink()
+                    if not any(spike_tmp_dir.iterdir()):
+                        spike_tmp_dir.rmdir()
+
+            # --- Merge detector outputs tmp files ---
+            det_tmp_dir = cfg.DETECTOR_DIR / f"_tmp_{run_name}"
+            if det_tmp_dir.exists():
+                det_files = sorted(det_tmp_dir.glob("seq_*.pt"))
+                if det_files:
+                    det_final = torch.cat(
+                        [torch.load(f, weights_only=True) for f in det_files], dim=0
+                    )
+                    cfg.DETECTOR_DIR.mkdir(parents=True, exist_ok=True)
+                    torch.save(det_final, cfg.DETECTOR_DIR / f"{run_name}.pt")
+                    overall_pbar.write(f"  Saved detector outputs: {det_final.shape} -> {run_name}.pt")
+                    del det_final
+                    for f in det_files:
+                        f.unlink()
+                    if not any(det_tmp_dir.iterdir()):
+                        det_tmp_dir.rmdir()
 
         else:
             overall_pbar.write(f"  Warning: No data collected for {run_name}")

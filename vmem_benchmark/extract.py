@@ -355,8 +355,7 @@ def run_benchmark():
         if phi_path.exists() and tgap_path.exists() and ann_path.exists():
             existing = torch.load(phi_path, weights_only=False)
             done_seqs_saved = set(existing.get('done_seqs', []))
-            max_seq = getattr(cfg, 'MAX_SEQUENCES', None)
-            needed = set(range(max_seq)) if max_seq is not None else set(range(len(seq_dirs)))
+            needed = set(range(len(seq_dirs)))
 
             if needed.issubset(done_seqs_saved):
                 # All requested sequences are already in the file — skip entirely
@@ -591,7 +590,7 @@ def run_benchmark():
                     traj_bank[l_idx].append(torch.cat(tensor_list, dim=1))
 
             # --- 5. Aggressive Memory Cleanup ---
-            del hist_torch_cpu, seq_phi_gpu, seq_traj_cpu, seq_asab_gap_cpu, seq_last_ann_gap_cpu, seq_head_cls_L0_gap_cpu, seq_spike_rate_cpu, seq_spike_entropy_cpu, seq_det_outputs_cpu
+            del hist_torch_cpu, seq_phi_gpu, seq_traj_cpu, seq_temporal_phi_cpu, seq_temporal_gap_cpu, seq_asab_gap_cpu, seq_last_ann_gap_cpu, seq_head_cls_L0_gap_cpu, seq_spike_rate_cpu, seq_spike_entropy_cpu, seq_det_outputs_cpu
             gc.collect()
             if cfg.DEVICE == "cuda":
                 torch.cuda.empty_cache()

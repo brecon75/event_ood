@@ -49,7 +49,11 @@ def main():
             train_feat = extract_representation(all_feats['clean'], rep)
             if train_feat is None: continue
             
-            clean_scores = get_mahalanobis_scores(train_feat, train_feat)
+            n = len(train_feat)
+            split = int(n * 0.7)
+            rng = np.random.default_rng(42)
+            perm = rng.permutation(n)
+            clean_scores = get_mahalanobis_scores(train_feat[perm[:split]], train_feat[perm[split:]])
             
             all_scores = list(clean_scores)
             all_severities = [0] * len(clean_scores)
@@ -86,13 +90,13 @@ def main():
             train_feat = extract_representation(all_feats['clean'], rep)
         for d_name, d_model in detectors.items():
             if d_name == 'mahalanobis': continue # Already done
-            
-            def get_scores(model, X):
-                if d_name == 'knn': return score_knn(model, X)
-                if d_name == 'gmm': return score_gmm(model, X)
-                if d_name == 'ocsvm': return score_ocsvm(model, X)
-                if d_name == 'pca': return score_pca(model, X)
-                if d_name == 'ae': return score_ae(model, X)
+
+            def get_scores(model, X, _d=d_name):
+                if _d == 'knn': return score_knn(model, X)
+                if _d == 'gmm': return score_gmm(model, X)
+                if _d == 'ocsvm': return score_ocsvm(model, X)
+                if _d == 'pca': return score_pca(model, X)
+                if _d == 'ae': return score_ae(model, X)
                 return score_mahalanobis(model, X)
                 
             clean_scores = get_scores(d_model, train_feat)

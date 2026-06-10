@@ -18,7 +18,7 @@ def score_mahalanobis(model, X):
 
 def score_knn(model, X):
     dists, _ = model.kneighbors(X)
-    return dists[:, -1] # distance to k-th neighbor
+    return dists.mean(axis=1)
 
 def score_gmm(model, X):
     return -model.score_samples(X)
@@ -68,7 +68,7 @@ def main():
         detectors['ae'] = ae
         
     results = []
-    sev3plus_data = {name: {'clean': [], 'corrupt': []} for name in detectors.keys()}
+    sev3plus_data = {name: {'corrupt': []} for name in detectors.keys()}
     
     # Precompute clean scores
     X_clean = extract_representation(all_feats['clean'], 'membrane_fused')

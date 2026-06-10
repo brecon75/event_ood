@@ -87,8 +87,9 @@ def run_per_layer_auroc_table(all_phi):
     TABLE_DIR.mkdir(parents=True, exist_ok=True)
     fieldnames = ["Layer"] + present + ["AVG"]
     with open(TABLE_DIR / "per_layer_auroc.csv", "w", newline="") as f:
-        csv.DictWriter(f, fieldnames=fieldnames).writeheader()
-        csv.DictWriter(f, fieldnames=fieldnames).writerows(rows)
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        w.writerows(rows)
     print(f"\n  Saved per_layer_auroc.csv")
 
     _plot_per_layer_heatmap(rows, present)

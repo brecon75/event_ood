@@ -105,20 +105,16 @@ def main():
         # Sort by OOD score (uncertainty). Reject highest OOD scores first.
         sorted_idx = np.argsort(ood_scores) # Ascending OOD score -> low uncertainty first
         
-        coverages = []
-        risks = []
+        run_coverages = []
+        run_risks = []
         n = len(sorted_idx)
-        
-        # Risk = average degradation of ACCEPTED samples
+
         for i in range(1, n + 1):
             accepted_idx = sorted_idx[:i]
-            coverage = i / n
-            risk = degradation[accepted_idx].mean()
-            
-            coverages.append(coverage)
-            risks.append(risk)
-            
-        aurc_val = auc(coverages, risks)
+            run_coverages.append(i / n)
+            run_risks.append(degradation[accepted_idx].mean())
+
+        aurc_val = auc(run_coverages, run_risks)
         
         parts = run_name.rsplit('_L', 1)
         corruption = parts[0]
@@ -150,10 +146,10 @@ def main():
         plt.savefig(fig_dir / "reliability_curve.pdf")
         plt.close()
         
-        # Plot Risk-Coverage for a sample run
-        if len(risks) > 0 and len(coverages) > 0:
+        # Plot Risk-Coverage for the last processed run as a sample
+        if len(run_risks) > 0 and len(run_coverages) > 0:
             plt.figure(figsize=(8, 6))
-            plt.plot(coverages, risks, marker='o', markersize=3)
+            plt.plot(run_coverages, run_risks, marker='o', markersize=3)
             plt.xlabel("Coverage")
             plt.ylabel("Risk (Mean Degradation)")
             plt.title("Risk-Coverage Curve (Sample)")

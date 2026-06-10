@@ -6,9 +6,14 @@ Performs 31 inference passes (1 clean + 6 types x 5 severities).
 Collects phi features and trajectory subsets.
 
 Optimized with:
-- concurrent.futures prefetching (hides I/O and corruption latency)
 - Deferred GPU-CPU syncing (eliminates per-batch blocking)
 - cudnn.benchmark = True
+
+All per-run artifacts (phi, temporal phi, temporal GAP, ANN features, spike
+stats, detection outputs) are written per sequence to a _tmp_<run> directory
+and merged into the final <run>.pt in sequence-index order, together with
+'done_seqs' and 'seq_lens' metadata. This makes crash/resume safe for every
+artifact type and lets downstream analyses split frames by sequence.
 """
 import torch
 import numpy as np
@@ -17,7 +22,6 @@ from tqdm import tqdm
 import time
 import sys
 import gc
-import concurrent.futures
 import argparse
 
 # Setup paths and resolve CLI overrides before other imports
@@ -73,6 +77,7 @@ def resolve_defaults_and_args():
     parser.add_argument("--input-dir", type=str, help="Direct path to the directory containing sequence folders (bypasses --gen1-root and --split)")
     parser.add_argument("--vram-fraction", type=float, default=1.0, help="Fraction of GPU VRAM PyTorch is allowed to allocate (0.0 to 1.0). Set to 1.0 for unlimited.")
     parser.add_argument("--skip-clean", action="store_true", help="Skip running the clean/baseline run")
+    parser.add_argument("--clean-only", action="store_true", help="Run only the clean/baseline pass (no corruptions)")
     
     
     # We parse known args so it doesn't break if run inside environment frameworks with extra args
@@ -165,11 +170,17 @@ def resolve_defaults_and_args():
     cfg.GEN1_ROOT = resolved_gen1.resolve()
     cfg.CKPT_PATH = resolved_ckpt.resolve()
     cfg.OUTPUT_DIR = resolved_output.resolve()
+    # Rebase ALL output subdirectories onto the resolved OUTPUT_DIR so that a
+    # --output-dir override moves every artifact, not just phi/trajs/plots.
     cfg.PHI_DIR = cfg.OUTPUT_DIR / "phi"
     cfg.TRAJ_DIR = cfg.OUTPUT_DIR / "trajs"
     cfg.PLOT_DIR = cfg.OUTPUT_DIR / "plots"
     cfg.TEMPORAL_PHI_DIR = cfg.OUTPUT_DIR / "temporal_phi"
-    
+    cfg.ANN_DIR = cfg.OUTPUT_DIR / "ann_features"
+    cfg.SPIKE_DIR = cfg.OUTPUT_DIR / "spike"
+    cfg.DETECTOR_DIR = cfg.OUTPUT_DIR / "detectors"
+    cfg.DET_OUT_DIR = cfg.OUTPUT_DIR / "det_outputs"
+
     # Direct Input Directory Bypass (None if not explicitly passed)
     if args.input_dir:
         cfg.INPUT_DIR = Path(args.input_dir).resolve()
@@ -202,7 +213,9 @@ def resolve_defaults_and_args():
 
     if args.split:
         cfg.SPLIT = args.split
-    if args.corruptions:
+    if args.clean_only:
+        cfg.CORRUPTIONS = []
+    elif args.corruptions:
         cfg.CORRUPTIONS = args.corruptions
     if args.severities:
         cfg.SEVERITIES = args.severities
@@ -256,22 +269,116 @@ from pipeline.loader import load_histogram
 from spikingjelly.clock_driven import functional
 
 
-def _cpu_loader_worker(seq_dir, c_name, severity):
+def _cpu_loader_worker(seq_dir, c_name, severity, seq_idx):
     """
-    Worker function to load and corrupt a single sequence on the CPU.
+    Load and corrupt a single sequence on the CPU.
     Returns the numpy array ready for GPU transfer.
+
+    The corruption seed is derived from the sequence index so every sequence
+    gets an independent noise realization (same base seed keeps the benchmark
+    deterministic and pairs realizations across severities).
     """
     try:
         hist_np, _ = load_histogram(seq_dir)
         if c_name is not None:
-            # Apply corruption on CPU numpy array
             hist_np = apply_corruption_to_tensor(
-                torch.from_numpy(hist_np), c_name, severity
+                torch.from_numpy(hist_np), c_name, severity, seed=[42, seq_idx]
             ).numpy()
         return hist_np
     except Exception as e:
         print(f"\nError loading {seq_dir}: {e}")
         return None
+
+
+def _merge_seq_artifact(tmp_dir, final_path, data_keys, run_name, log=print):
+    """
+    Merge per-sequence tmp files (seq_<idx>.pt) with any existing final file
+    into a single artifact ordered by sequence index.
+
+    Each tmp file holds either a raw tensor (single-key artifacts) or a dict
+    of tensors. The final file stores, for every key in `data_keys`, the rows
+    of all sequences concatenated in ascending sequence-index order, plus:
+      'run'       — run name
+      'done_seqs' — sorted list of sequence indices contained in the file
+      'seq_lens'  — frame count per sequence (aligned with done_seqs), or
+                    absent when a legacy file without metadata was merged.
+
+    Returns True if a final file was written.
+    """
+    tmp_files = sorted(tmp_dir.glob("seq_*.pt")) if tmp_dir.exists() else []
+    per_seq = {}
+    for f in tmp_files:
+        idx = int(f.stem.split("_")[1])
+        loaded = torch.load(f, weights_only=True, map_location="cpu")
+        per_seq[idx] = loaded if isinstance(loaded, dict) else {data_keys[0]: loaded}
+
+    # Load and, where possible, decompose the existing final file so resumed
+    # runs keep their historical sequences in the right place.
+    legacy_block = None  # (data dict, done set) when old rows can't be split
+    if final_path.exists():
+        old = torch.load(final_path, weights_only=True, map_location="cpu")
+        if not isinstance(old, dict):
+            old = {data_keys[0]: old}
+        old_done = list(old.get("done_seqs", []))
+        old_lens = list(old.get("seq_lens", []))
+        old_data = {k: old[k] for k in data_keys if k in old}
+        if old_data:
+            n_rows = int(next(iter(old_data.values())).shape[0])
+            if old_done and len(old_done) == len(old_lens) and sum(old_lens) == n_rows:
+                off = 0
+                for s_idx, s_len in zip(old_done, old_lens):
+                    # Freshly extracted tmp data wins over historical rows.
+                    if s_idx not in per_seq:
+                        per_seq[s_idx] = {k: v[off:off + s_len] for k, v in old_data.items()}
+                    off += s_len
+            else:
+                # Legacy file without per-sequence metadata: keep it as one
+                # opaque block and drop seqs it already covers from tmp data.
+                legacy_done = set(old_done)
+                per_seq = {i: d for i, d in per_seq.items() if i not in legacy_done}
+                legacy_block = (old_data, legacy_done)
+                log(f"  [merge] {final_path.name}: legacy file without seq metadata; "
+                    f"appending new sequences after the historical block.")
+
+    if not per_seq and legacy_block is None:
+        if tmp_dir.exists() and not any(tmp_dir.iterdir()):
+            tmp_dir.rmdir()
+        return False
+
+    parts = {k: [] for k in data_keys}
+    done_all = []
+    seq_lens = []
+    if legacy_block is not None:
+        old_data, legacy_done = legacy_block
+        for k in data_keys:
+            if k in old_data:
+                parts[k].append(old_data[k])
+        done_all.extend(sorted(legacy_done))
+        seq_lens = None  # row→sequence mapping unknown for the legacy block
+
+    for s_idx in sorted(per_seq.keys()):
+        chunk = per_seq[s_idx]
+        for k in data_keys:
+            if k in chunk:
+                parts[k].append(chunk[k])
+        done_all.append(s_idx)
+        if seq_lens is not None:
+            seq_lens.append(int(next(iter(chunk.values())).shape[0]))
+
+    out = {k: torch.cat(v, dim=0) for k, v in parts.items() if v}
+    out["run"] = run_name
+    out["done_seqs"] = sorted(set(done_all))
+    if seq_lens is not None:
+        out["seq_lens"] = seq_lens
+
+    final_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(out, final_path)
+
+    for f in tmp_files:
+        f.unlink()
+    if tmp_dir.exists() and not any(tmp_dir.iterdir()):
+        tmp_dir.rmdir()
+    return True
 
 
 def run_benchmark():
@@ -346,15 +453,14 @@ def run_benchmark():
         traj_path = cfg.TRAJ_DIR / f"{run_name}.pt"
 
         # --- Smart resume: check if existing phi covers all requested sequences ---
-        historical_phi = None    # phi tensor loaded from a previous completed run
-        historical_ann = None    # ann dict loaded from a previous completed run
         done_seqs = set()        # sequence indices already processed
 
         tgap_path = cfg.OUTPUT_DIR / "temporal_gap" / f"{run_name}.pt"
         ann_path = cfg.ANN_DIR / f"{run_name}.pt"
         if phi_path.exists() and tgap_path.exists() and ann_path.exists():
-            existing = torch.load(phi_path, weights_only=False)
+            existing = torch.load(phi_path, weights_only=True, map_location="cpu")
             done_seqs_saved = set(existing.get('done_seqs', []))
+            del existing
             needed = set(range(len(seq_dirs)))
 
             if needed.issubset(done_seqs_saved):
@@ -362,17 +468,8 @@ def run_benchmark():
                 overall_pbar.write(f"[skip] {run_name} — all {len(done_seqs_saved)} seqs already done.")
                 continue
 
-            # Partial: load existing phi so we can extend it
-            historical_phi = existing['phi']   # CPU tensor, kept for final cat
-
-            # Load existing ANN features to extend
-            existing_ann = torch.load(ann_path, weights_only=False)
-            historical_ann = {
-                'asab_gap': existing_ann['asab_gap'],
-                'last_ann_gap': existing_ann['last_ann_gap'],
-                'head_cls_L0_gap': existing_ann['head_cls_L0_gap']
-            }
-
+            # Partial: the merge step prepends historical data per artifact,
+            # so here we only need to know which sequences to skip.
             done_seqs = done_seqs_saved
             overall_pbar.write(
                 f"\n[RUN] {run_name}  (extending: {len(done_seqs)} seqs done, "
@@ -401,7 +498,7 @@ def run_benchmark():
                 continue
 
             # Load and corrupt synchronously (uses 50% less CPU RAM)
-            hist_np = _cpu_loader_worker(seq_dir, c_name, severity)
+            hist_np = _cpu_loader_worker(seq_dir, c_name, severity, i)
 
             if hist_np is None:
                 continue
@@ -576,7 +673,7 @@ def run_benchmark():
             # Save sequence detector outputs online
             if seq_det_outputs_cpu:
                 det_seq = torch.cat(seq_det_outputs_cpu, dim=0)
-                det_tmp_dir = cfg.DETECTOR_DIR / f"_tmp_{run_name}"
+                det_tmp_dir = cfg.DET_OUT_DIR / f"_tmp_{run_name}"
                 det_tmp_dir.mkdir(parents=True, exist_ok=True)
                 torch.save(det_seq, det_tmp_dir / f"seq_{i:05d}.pt")
                 del det_seq
@@ -595,144 +692,55 @@ def run_benchmark():
             if cfg.DEVICE == "cuda":
                 torch.cuda.empty_cache()
 
-        # --- Merge all per-sequence phi files into the final output ---
-        seq_files = sorted(phi_tmp_dir.glob("seq_*.pt"))
-        new_parts = [torch.load(f, weights_only=True) for f in seq_files]
+        # --- Merge all per-sequence tmp files (plus any historical final
+        #     file) into sequence-index-ordered final outputs ---
+        wrote_phi = _merge_seq_artifact(
+            phi_tmp_dir, phi_path, ["phi"], run_name, log=overall_pbar.write)
 
-        if new_parts or historical_phi is not None:
-            parts_to_cat = ([historical_phi] if historical_phi is not None else []) + new_parts
-            phi_final = torch.cat(parts_to_cat, dim=0)
-
-            # Track every sequence index that is now in the file
-            all_done = done_seqs | {int(f.stem.split('_')[1]) for f in seq_files}
-            torch.save({'phi': phi_final, 'run': run_name, 'done_seqs': sorted(all_done)}, phi_path)
+        if wrote_phi:
+            saved = torch.load(phi_path, weights_only=True, map_location="cpu")
             overall_pbar.write(
-                f"  Saved phi: {phi_final.shape[0]} rows from {len(all_done)} sequences "
-                f"-> {phi_path.name}"
+                f"  Saved phi: {saved['phi'].shape[0]} rows from "
+                f"{len(saved['done_seqs'])} sequences -> {phi_path.name}"
             )
-            del phi_final, historical_phi
-
-            # Clean up temp directory
-            for f in seq_files:
-                f.unlink()
-            if not any(phi_tmp_dir.iterdir()):
-                phi_tmp_dir.rmdir()
-
-            if traj_bank:
-                traj_final = {l: torch.cat(v, dim=1) for l, v in traj_bank.items()}
-                torch.save({'trajs': traj_final, 'run': run_name}, traj_path)
-
-            # --- Merge temporal phi tmp files ---
-            tphi_tmp_dir = cfg.TEMPORAL_PHI_DIR / f"_tmp_{run_name}"
-            if tphi_tmp_dir.exists():
-                tphi_files = sorted(tphi_tmp_dir.glob("seq_*.pt"))
-                if tphi_files:
-                    tphi_final = torch.cat(
-                        [torch.load(f, weights_only=True) for f in tphi_files], dim=0
-                    )
-                    cfg.TEMPORAL_PHI_DIR.mkdir(parents=True, exist_ok=True)
-                    torch.save({'temporal_phi': tphi_final, 'run': run_name},
-                               cfg.TEMPORAL_PHI_DIR / f"{run_name}.pt")
-                    overall_pbar.write(
-                        f"  Saved temporal phi: {tphi_final.shape} -> {run_name}.pt"
-                    )
-                    del tphi_final
-                    for f in tphi_files:
-                        f.unlink()
-                    if not any(tphi_tmp_dir.iterdir()):
-                        tphi_tmp_dir.rmdir()
-
-            # --- Merge temporal gap trajectories tmp files ---
-            tgap_tmp_dir = cfg.OUTPUT_DIR / "temporal_gap" / f"_tmp_{run_name}"
-            if tgap_tmp_dir.exists():
-                tgap_files = sorted(tgap_tmp_dir.glob("seq_*.pt"))
-                if tgap_files:
-                    tgap_final = torch.cat(
-                        [torch.load(f, weights_only=True) for f in tgap_files], dim=0
-                    )
-                    tgap_dir = cfg.OUTPUT_DIR / "temporal_gap"
-                    tgap_dir.mkdir(parents=True, exist_ok=True)
-                    torch.save({'temporal_gap': tgap_final, 'run': run_name},
-                               tgap_dir / f"{run_name}.pt")
-                    overall_pbar.write(
-                        f"  Saved temporal gap: {tgap_final.shape} -> {run_name}.pt"
-                    )
-                    del tgap_final
-                    for f in tgap_files:
-                        f.unlink()
-                    if not any(tgap_tmp_dir.iterdir()):
-                        tgap_tmp_dir.rmdir()
-
-            # --- Merge ANN features tmp files ---
-            ann_tmp_dir = cfg.ANN_DIR / f"_tmp_{run_name}"
-            if ann_tmp_dir.exists():
-                ann_files = sorted(ann_tmp_dir.glob("seq_*.pt"))
-                if ann_files:
-                    ann_loaded = [torch.load(f, weights_only=True) for f in ann_files]
-                    
-                    asab_parts = ([historical_ann['asab_gap']] if historical_ann is not None else []) + [d['asab_gap'] for d in ann_loaded]
-                    last_ann_parts = ([historical_ann['last_ann_gap']] if historical_ann is not None else []) + [d['last_ann_gap'] for d in ann_loaded]
-                    head_cls_parts = ([historical_ann['head_cls_L0_gap']] if historical_ann is not None else []) + [d['head_cls_L0_gap'] for d in ann_loaded]
-                    
-                    asab_gap_final = torch.cat(asab_parts, dim=0)
-                    last_ann_gap_final = torch.cat(last_ann_parts, dim=0)
-                    head_cls_L0_gap_final = torch.cat(head_cls_parts, dim=0)
-                    
-                    cfg.ANN_DIR.mkdir(parents=True, exist_ok=True)
-                    torch.save({
-                        'asab_gap': asab_gap_final,
-                        'last_ann_gap': last_ann_gap_final,
-                        'head_cls_L0_gap': head_cls_L0_gap_final
-                    }, cfg.ANN_DIR / f"{run_name}.pt")
-                    overall_pbar.write(f"  Saved ANN features: {asab_gap_final.shape} -> {run_name}.pt")
-                    
-                    del asab_gap_final, last_ann_gap_final, head_cls_L0_gap_final, ann_loaded
-                    for f in ann_files:
-                        f.unlink()
-                    if not any(ann_tmp_dir.iterdir()):
-                        ann_tmp_dir.rmdir()
-
-            # --- Merge spike tmp files ---
-            spike_tmp_dir = cfg.SPIKE_DIR / f"_tmp_{run_name}"
-            if spike_tmp_dir.exists():
-                spike_files = sorted(spike_tmp_dir.glob("seq_*.pt"))
-                if spike_files:
-                    parts = [torch.load(f, weights_only=True) for f in spike_files]
-                    sp_rate_final = torch.cat([p['spike_rate'] for p in parts], dim=0)
-                    sp_ent_final = torch.cat([p['spike_entropy'] for p in parts], dim=0)
-                    cfg.SPIKE_DIR.mkdir(parents=True, exist_ok=True)
-                    torch.save({
-                        'spike_rate': sp_rate_final,
-                        'spike_entropy': sp_ent_final
-                    }, cfg.SPIKE_DIR / f"{run_name}.pt")
-                    overall_pbar.write(f"  Saved spike stats: {sp_rate_final.shape} -> {run_name}.pt")
-                    del sp_rate_final, sp_ent_final, parts
-                    for f in spike_files:
-                        f.unlink()
-                    if not any(spike_tmp_dir.iterdir()):
-                        spike_tmp_dir.rmdir()
-
-            # --- Merge detector outputs tmp files ---
-            det_tmp_dir = cfg.DETECTOR_DIR / f"_tmp_{run_name}"
-            if det_tmp_dir.exists():
-                det_files = sorted(det_tmp_dir.glob("seq_*.pt"))
-                if det_files:
-                    det_final = torch.cat(
-                        [torch.load(f, weights_only=True) for f in det_files], dim=0
-                    )
-                    cfg.DETECTOR_DIR.mkdir(parents=True, exist_ok=True)
-                    torch.save(det_final, cfg.DETECTOR_DIR / f"{run_name}.pt")
-                    overall_pbar.write(f"  Saved detector outputs: {det_final.shape} -> {run_name}.pt")
-                    del det_final
-                    for f in det_files:
-                        f.unlink()
-                    if not any(det_tmp_dir.iterdir()):
-                        det_tmp_dir.rmdir()
-
+            del saved
         else:
             overall_pbar.write(f"  Warning: No data collected for {run_name}")
-            if not any(phi_tmp_dir.iterdir()):
-                phi_tmp_dir.rmdir()
+
+        if traj_bank:
+            traj_final = {l: torch.cat(v, dim=1) for l, v in traj_bank.items()}
+            torch.save({'trajs': traj_final, 'run': run_name}, traj_path)
+
+        if _merge_seq_artifact(
+                cfg.TEMPORAL_PHI_DIR / f"_tmp_{run_name}",
+                cfg.TEMPORAL_PHI_DIR / f"{run_name}.pt",
+                ["temporal_phi"], run_name, log=overall_pbar.write):
+            overall_pbar.write(f"  Saved temporal phi -> {run_name}.pt")
+
+        if _merge_seq_artifact(
+                cfg.OUTPUT_DIR / "temporal_gap" / f"_tmp_{run_name}",
+                cfg.OUTPUT_DIR / "temporal_gap" / f"{run_name}.pt",
+                ["temporal_gap"], run_name, log=overall_pbar.write):
+            overall_pbar.write(f"  Saved temporal gap -> {run_name}.pt")
+
+        if _merge_seq_artifact(
+                cfg.ANN_DIR / f"_tmp_{run_name}",
+                cfg.ANN_DIR / f"{run_name}.pt",
+                ["asab_gap", "last_ann_gap", "head_cls_L0_gap"],
+                run_name, log=overall_pbar.write):
+            overall_pbar.write(f"  Saved ANN features -> {run_name}.pt")
+
+        if _merge_seq_artifact(
+                cfg.SPIKE_DIR / f"_tmp_{run_name}",
+                cfg.SPIKE_DIR / f"{run_name}.pt",
+                ["spike_rate", "spike_entropy"], run_name, log=overall_pbar.write):
+            overall_pbar.write(f"  Saved spike stats -> {run_name}.pt")
+
+        if _merge_seq_artifact(
+                cfg.DET_OUT_DIR / f"_tmp_{run_name}",
+                cfg.DET_OUT_DIR / f"{run_name}.pt",
+                ["det"], run_name, log=overall_pbar.write):
+            overall_pbar.write(f"  Saved detection outputs -> {run_name}.pt")
     monitor.remove()
     print("\nBenchmark extraction complete.")
 

@@ -35,6 +35,17 @@ def get_resnet_feature_extractor(in_channels=2):
 
     return FeatureAndLogit(model)
 
+
+@torch.no_grad()
+def run_batched(model, x, device, batch_size=64):
+    feats, logits = [], []
+    for chunk in torch.split(x, batch_size):
+        f, l = model(chunk.to(device))
+        feats.append(f.cpu())
+        logits.append(l.cpu())
+    return torch.cat(feats, dim=0), torch.cat(logits, dim=0)
+
+
 def main():
     print("Extracting ANN Baselines (Event Image & Voxel Grid)...")
 
@@ -67,62 +78,63 @@ def main():
         for sev in cfg.SEVERITIES:
             runs.append((f"{c_name}_L{sev}", c_name, sev))
 
-    # Accumulators: run_name -> list of {feat, logit}
-    img_feats_all = {run_name: [] for run_name, _, _ in runs}
-    vox_feats_all = {run_name: [] for run_name, _, _ in runs}
-
-    # Outer loop over sequences — each sequence is loaded exactly once
-    for seq_dir in tqdm(seq_dirs, desc="Sequences"):
-        try:
-            hist_np, _ = load_histogram(seq_dir)
-        except Exception:
+    # Runs in the outer loop so each run's features are saved (and freed)
+    # before the next one starts — accumulating all 31 runs of per-frame
+    # features in RAM is not feasible.
+    for run_name, c_name, severity in tqdm(runs, desc="Runs"):
+        out_img = out_dir_img / f"{run_name}.pt"
+        out_vox = out_dir_vox / f"{run_name}.pt"
+        if out_img.exists() and out_vox.exists():
             continue
 
-        C = hist_np.shape[1]
-        c_half = C // 2
+        img_feats, img_logits = [], []
+        vox_feats, vox_logits = [], []
 
-        for run_name, c_name, severity in runs:
+        for seq_idx, seq_dir in enumerate(tqdm(seq_dirs, desc=run_name, leave=False)):
+            try:
+                hist_np, _ = load_histogram(seq_dir)
+            except Exception as e:
+                print(f"  Skipping {seq_dir.name}: {e}")
+                continue
+
             if c_name is not None:
                 arr = apply_corruption_to_tensor(
-                    torch.from_numpy(hist_np), c_name, severity
+                    torch.from_numpy(hist_np), c_name, severity, seed=[42, seq_idx]
                 ).float()
             else:
                 arr = torch.from_numpy(hist_np).float()
 
-            # Event image: sum over T, split into 2 polarity channels
-            img_sum = arr.sum(dim=0)  # (C, H, W)
+            # Scale uint8 counts into [0, 1] before the ImageNet-pretrained
+            # backbone — raw counts up to 255 would saturate the features.
+            arr = arr / 255.0
+
+            C = arr.shape[1]
+            c_half = C // 2
+
+            # Event image PER FRAME: collapse the 10 time bins of each
+            # polarity -> (N, 2, H, W). (Frames must NOT be summed together —
+            # one feature per frame, aligned with the per-frame phi rows.)
             img_2c = torch.stack(
-                [img_sum[:c_half].sum(0), img_sum[c_half:].sum(0)], dim=0
-            ).unsqueeze(0)  # (1, 2, H, W)
-
-            # Voxel grid: sum over T into 20 channels
-            vox_img = arr.sum(dim=0).unsqueeze(0)  # (1, 20, H, W)
-
-            with torch.no_grad():
-                feat_img, logit_img = resnet_img(img_2c.to(device))
-                feat_vox, logit_vox = resnet_vox(vox_img.to(device))
-
-            img_feats_all[run_name].append({"feat": feat_img.cpu(), "logit": logit_img.cpu()})
-            vox_feats_all[run_name].append({"feat": feat_vox.cpu(), "logit": logit_vox.cpu()})
-
-    # Save one file per run
-    print("Saving...")
-    for run_name, _, _ in tqdm(runs, desc="Saving runs"):
-        if img_feats_all[run_name]:
-            torch.save(
-                {
-                    "feat": torch.cat([d["feat"] for d in img_feats_all[run_name]], dim=0),
-                    "logit": torch.cat([d["logit"] for d in img_feats_all[run_name]], dim=0),
-                },
-                out_dir_img / f"{run_name}.pt",
+                [arr[:, :c_half].sum(dim=1), arr[:, c_half:].sum(dim=1)], dim=1
             )
-        if vox_feats_all[run_name]:
+
+            # Voxel grid PER FRAME: keep all 20 (bin, polarity) channels.
+            vox = arr  # (N, 20, H, W)
+
+            f_img, l_img = run_batched(resnet_img, img_2c, device)
+            f_vox, l_vox = run_batched(resnet_vox, vox, device)
+            img_feats.append(f_img);  img_logits.append(l_img)
+            vox_feats.append(f_vox);  vox_logits.append(l_vox)
+
+        if img_feats:
             torch.save(
-                {
-                    "feat": torch.cat([d["feat"] for d in vox_feats_all[run_name]], dim=0),
-                    "logit": torch.cat([d["logit"] for d in vox_feats_all[run_name]], dim=0),
-                },
-                out_dir_vox / f"{run_name}.pt",
+                {"feat": torch.cat(img_feats, dim=0), "logit": torch.cat(img_logits, dim=0)},
+                out_img,
+            )
+        if vox_feats:
+            torch.save(
+                {"feat": torch.cat(vox_feats, dim=0), "logit": torch.cat(vox_logits, dim=0)},
+                out_vox,
             )
 
 if __name__ == "__main__":

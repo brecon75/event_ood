@@ -9,7 +9,9 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent))
 from vmem_benchmark import benchmark_config as cfg
-from analysis.vmem_utils import LAYER_SPECS, _get_present, auroc_fpr95
+from analysis.vmem_utils import (
+    LAYER_SPECS, _get_present, auroc_fpr95, split_train_eval,
+)
 from analysis.vmem_scorers import mahalanobis_scorer
 from sklearn.decomposition import PCA
 
@@ -69,7 +71,8 @@ def plot_all_trajectories(n_samples=8):
                if any((cfg.TRAJ_DIR / f"{c}_L{s}.pt").exists()
                       for s in cfg.SEVERITIES)]
     if not present:
-        present = []
+        print("  No corrupted trajectory files found, skipping trajectory plots.")
+        return
 
     corr_means = {li: {c: {} for c in present} for li in range(len(LAYER_SPECS))}
     for c_name in present:
@@ -125,12 +128,11 @@ def plot_auroc_vs_severity(all_phi):
         return
 
     clean = all_phi["clean"]
-    n = len(clean)
-    split = int(n * 0.7)
-    rng = np.random.default_rng(42)
-    perm = rng.permutation(n)
-    scorer = mahalanobis_scorer(clean[perm[:split]])
-    cs = scorer(clean[perm[split:]])
+    # Sequence-aware contiguous split (random frame splits leak temporally)
+    seq_lens = all_phi.get_seq_lens("clean") if hasattr(all_phi, "get_seq_lens") else None
+    clean_train, clean_eval = split_train_eval(clean, seq_lens=seq_lens)
+    scorer = mahalanobis_scorer(clean_train)
+    cs = scorer(clean_eval)
 
     plt.figure(figsize=(11, 5))
     for c_name in present:

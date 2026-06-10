@@ -11,7 +11,7 @@ from vmem_benchmark import benchmark_config as cfg
 
 from analysis.vmem_utils import (
     TABLE_DIR, load_all_temporal_phi, load_traj_as_temporal_phi,
-    auroc_fpr95, _get_present
+    auroc_fpr95, _get_present, split_train_eval, load_phi_seq_lens,
 )
 from analysis.vmem_models import prepare_temporal_ae_input
 from analysis.vmem_scorers import mahalanobis_scorer, temporal_autoencoder_scorer
@@ -54,15 +54,13 @@ def run_temporal_analysis(all_phi):
         return
 
     clean_tp = all_tphi["clean"]
-    
-    # Split handcrafted temporal phi (70% train / 30% test)
-    rng = np.random.default_rng(42)
-    indices = np.arange(len(clean_tp))
-    rng.shuffle(indices)
-    split_idx = int(len(clean_tp) * 0.7)
-    clean_tp_train = clean_tp[indices[:split_idx]]
-    clean_tp_test = clean_tp[indices[split_idx:]]
-    
+
+    # Split handcrafted temporal phi 70/30. Contiguous sequence-aware split —
+    # random frame shuffling would leak adjacent near-duplicate frames.
+    clean_tp_train, clean_tp_test = split_train_eval(
+        clean_tp,
+        seq_lens=load_phi_seq_lens("clean", cfg.OUTPUT_DIR / "temporal_phi"))
+
     hc_scorer = mahalanobis_scorer(clean_tp_train)
     hc_clean_scores = hc_scorer(clean_tp_test)
 
@@ -72,6 +70,9 @@ def run_temporal_analysis(all_phi):
     
     ta_scorer = None
     ta_clean_scores = None
+    # rn -> torch.Tensor (already prepared, small) OR Path (lazy-loaded at
+    # scoring time). Holding every run's full GAP tensor in RAM at once would
+    # need hundreds of GB on the full benchmark.
     all_prepared_trajs = {}
 
     if clean_tgap_path.exists():
@@ -79,36 +80,23 @@ def run_temporal_analysis(all_phi):
         try:
             clean_data = torch.load(clean_tgap_path, map_location="cpu", weights_only=True)
             clean_tgap = clean_data["temporal_gap"] # (B, T, sum_C) tensor
-            
-            # Split clean temporal gap into train/test
-            n_samples = len(clean_tgap)
-            split_idx = int(n_samples * 0.7)
-            
-            rng = np.random.default_rng(42)
-            indices = np.arange(n_samples)
-            rng.shuffle(indices)
-            train_indices = indices[:split_idx]
-            test_indices = indices[split_idx:]
-            
-            train_tgap = clean_tgap[train_indices]
-            test_tgap = clean_tgap[test_indices]
-            
+
+            # Split clean temporal gap into train/test (contiguous,
+            # sequence-aware — no random frame shuffling).
+            train_tgap, test_tgap = split_train_eval(
+                clean_tgap, seq_lens=clean_data.get("seq_lens", None))
+
             print(f"  Training Temporal Autoencoder on clean split ({len(train_tgap)} samples)...")
             ta_scorer = temporal_autoencoder_scorer(train_tgap)
             ta_clean_scores = ta_scorer(test_tgap)
-            
-            all_prepared_trajs["clean"] = test_tgap
-            
+            del clean_data, clean_tgap, train_tgap, test_tgap
+
             for c_name in present:
                 for sev in cfg.SEVERITIES:
                     rn = f"{c_name}_L{sev}"
                     tgap_path = tgap_dir / f"{rn}.pt"
                     if tgap_path.exists():
-                        try:
-                            c_data = torch.load(tgap_path, map_location="cpu", weights_only=True)
-                            all_prepared_trajs[rn] = c_data["temporal_gap"]
-                        except Exception as e:
-                            print(f"    Failed to load {tgap_path.name}: {e}")
+                        all_prepared_trajs[rn] = tgap_path  # loaded lazily
         except Exception as e:
             print(f"  [!] Failed to initialize sequence learning from temporal gap: {e}")
             ta_scorer = None
@@ -122,25 +110,14 @@ def run_temporal_analysis(all_phi):
                 clean_data = torch.load(clean_traj_path, map_location="cpu", weights_only=True)
                 clean_trajs = clean_data["trajs"]
                 clean_x = prepare_temporal_ae_input(clean_trajs)
-                
-                # Split raw clean trajectories train/test
-                n_samples = len(clean_x)
-                split_idx = int(n_samples * 0.7)
-                rng = np.random.default_rng(42)
-                indices = np.arange(n_samples)
-                rng.shuffle(indices)
-                train_indices = indices[:split_idx]
-                test_indices = indices[split_idx:]
-                
-                train_x = clean_x[train_indices]
-                test_x = clean_x[test_indices]
+
+                # Split raw clean trajectories train/test (contiguous)
+                train_x, test_x = split_train_eval(clean_x)
                 
                 print(f"  Training Temporal Autoencoder on raw clean split ({len(train_x)} samples)...")
                 ta_scorer = temporal_autoencoder_scorer(train_x)
                 ta_clean_scores = ta_scorer(test_x)
-                
-                all_prepared_trajs["clean"] = test_x
-                
+
                 del clean_data, clean_trajs
                 gc.collect()
                 
@@ -183,7 +160,18 @@ def run_temporal_analysis(all_phi):
 
             if ta_scorer is not None and rn in all_prepared_trajs:
                 prep_traj = all_prepared_trajs[rn]
+                if isinstance(prep_traj, Path):
+                    # Lazy load: keep only one run's GAP tensor in RAM at a time
+                    try:
+                        prep_traj = torch.load(
+                            prep_traj, map_location="cpu", weights_only=True
+                        )["temporal_gap"]
+                    except Exception as e:
+                        print(f"    Failed to load {rn} temporal gap: {e}")
+                        ta_aurocs.append(float("nan"))
+                        continue
                 ta_scores = ta_scorer(prep_traj)
+                del prep_traj
                 yt_ta = np.concatenate([np.zeros(len(ta_clean_scores)), np.ones(len(ta_scores))])
                 ys_ta = np.concatenate([ta_clean_scores, ta_scores])
                 a_ta, _ = auroc_fpr95(yt_ta, ys_ta)
@@ -204,7 +192,8 @@ def run_temporal_analysis(all_phi):
 
     if comparison_results:
         plot_temporal_comparison(comparison_results)
-        
+
+        TABLE_DIR.mkdir(parents=True, exist_ok=True)
         with open(TABLE_DIR / "temporal_comparison.csv", "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=["Corruption", "Handcrafted_AUROC_L5", "TemporalAE_AUROC_L5"])
             w.writeheader()

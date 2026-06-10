@@ -100,7 +100,9 @@ def main():
             if w_idx > 0:
                 print(f"  [Worker {w_idx}] No corruptions assigned, skipping worker process.")
                 continue
-            cmd_args.extend(["--corruptions"]) # empty list
+            # argparse nargs='+' rejects an empty --corruptions list, so use
+            # the dedicated flag for a clean-only pass.
+            cmd_args.append("--clean-only")
             
         # If the clean run or corruptions are already present on disk, they will be skipped automatically by extract.py.
             
@@ -144,23 +146,37 @@ def main():
     # 6. Monitor processes
     active_processes = list(processes)
     start_time = time.time()
-    
-    while active_processes:
-        time.sleep(5)
-        still_active = []
-        for proc, f_log, w_idx, log_path in active_processes:
-            ret = proc.poll()
-            if ret is None:
-                still_active.append((proc, f_log, w_idx, log_path))
-            else:
-                f_log.close()
-                elapsed = time.time() - start_time
-                if ret == 0:
-                    print(f"  [Worker {w_idx}] Finished successfully in {elapsed:.1f}s.")
+
+    try:
+        while active_processes:
+            time.sleep(5)
+            still_active = []
+            for proc, f_log, w_idx, log_path in active_processes:
+                ret = proc.poll()
+                if ret is None:
+                    still_active.append((proc, f_log, w_idx, log_path))
                 else:
-                    print(f"  [Worker {w_idx}] FAILED with exit code {ret} (check {log_path.name}).")
-        active_processes = still_active
-        
+                    f_log.close()
+                    elapsed = time.time() - start_time
+                    if ret == 0:
+                        print(f"  [Worker {w_idx}] Finished successfully in {elapsed:.1f}s.")
+                    else:
+                        print(f"  [Worker {w_idx}] FAILED with exit code {ret} (check {log_path.name}).")
+            active_processes = still_active
+    except KeyboardInterrupt:
+        print("\nInterrupted — terminating workers...")
+        for proc, f_log, w_idx, _ in active_processes:
+            if proc.poll() is None:
+                proc.terminate()
+        for proc, f_log, w_idx, _ in active_processes:
+            try:
+                proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            f_log.close()
+            print(f"  [Worker {w_idx}] terminated.")
+        return
+
     print("\nAll parallel extraction workers completed.")
 
 if __name__ == "__main__":

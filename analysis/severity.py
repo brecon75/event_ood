@@ -12,7 +12,8 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vmem_benchmark import benchmark_config as cfg
 from analysis.representation_ablation import load_all_features, extract_representation, get_mahalanobis_scores
-from analysis.evaluate_detectors import score_mahalanobis, score_knn, score_gmm, score_ocsvm, score_pca, score_ae
+from analysis.evaluate_detectors import SCORERS
+from analysis.vmem_utils import split_train_eval, load_phi_seq_lens
 
 def main():
     print("Running severity monotonicity analysis...")
@@ -41,20 +42,19 @@ def main():
     # 1. Full membrane with all available fitted detectors
     # 2. All representations with Mahalanobis
     
+    clean_seq_lens = load_phi_seq_lens("clean")
+
     for c_name in tqdm(cfg.CORRUPTIONS, desc="Severity analysis"):
         # Build lists of scores and severities
-        
+
         # --- 1. All representations with Mahalanobis ---
         for rep in reps:
             train_feat = extract_representation(all_feats['clean'], rep)
             if train_feat is None: continue
-            
-            n = len(train_feat)
-            split = int(n * 0.7)
-            rng = np.random.default_rng(42)
-            perm = rng.permutation(n)
-            train_fit = train_feat[perm[:split]]
-            clean_scores = get_mahalanobis_scores(train_fit, train_feat[perm[split:]])
+
+            # Sequence-aware split: fit on train, clean baseline = held-out eval
+            train_fit, clean_eval = split_train_eval(train_feat, seq_lens=clean_seq_lens)
+            clean_scores = get_mahalanobis_scores(train_fit, clean_eval)
 
             all_scores = list(clean_scores)
             all_severities = [0] * len(clean_scores)
@@ -70,7 +70,8 @@ def main():
                     scores = get_mahalanobis_scores(train_fit, test_feat)
                     all_scores.extend(scores)
                     all_severities.extend([sev] * len(scores))
-                except:
+                except Exception as e:
+                    print(f"  [!] {run_name}/{rep}: scoring failed ({e})")
                     continue
                     
             if len(set(all_severities)) > 1:
@@ -89,28 +90,30 @@ def main():
         if train_feat is None:
             rep = 'full_membrane'
             train_feat = extract_representation(all_feats['clean'], rep)
+        if train_feat is None:
+            continue
+        # The fitted detectors were trained on the clean-train portion
+        # (fit_detectors.py); only score the held-out eval portion as the
+        # severity-0 baseline so it is not the detectors' own training data.
+        _, clean_eval = split_train_eval(train_feat, seq_lens=clean_seq_lens)
         for d_name, d_model in detectors.items():
             if d_name == 'mahalanobis': continue # Already done
+            score_fn = SCORERS.get(d_name)
+            if score_fn is None:
+                print(f"  [!] Unknown detector '{d_name}' — skipping.")
+                continue
 
-            def get_scores(model, X, _d=d_name):
-                if _d == 'knn': return score_knn(model, X)
-                if _d == 'gmm': return score_gmm(model, X)
-                if _d == 'ocsvm': return score_ocsvm(model, X)
-                if _d == 'pca': return score_pca(model, X)
-                if _d == 'ae': return score_ae(model, X)
-                return score_mahalanobis(model, X)
-                
-            clean_scores = get_scores(d_model, train_feat)
+            clean_scores = score_fn(d_model, clean_eval)
             all_scores = list(clean_scores)
             all_severities = [0] * len(clean_scores)
-            
+
             for sev in cfg.SEVERITIES:
                 run_name = f"{c_name}_L{sev}"
                 if run_name not in all_feats: continue
                 test_feat = extract_representation(all_feats[run_name], rep)
                 if test_feat is None: continue
-                
-                scores = get_scores(d_model, test_feat)
+
+                scores = score_fn(d_model, test_feat)
                 all_scores.extend(scores)
                 all_severities.extend([sev] * len(scores))
                 

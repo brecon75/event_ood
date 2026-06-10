@@ -7,7 +7,7 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vmem_benchmark import benchmark_config as cfg
-from analysis.vmem_utils import LAYER_SPECS
+from analysis.vmem_utils import LAYER_SPECS, split_train_eval
 from analysis.vmem_models import TemporalAutoencoder, train_temporal_ae_model
 
 def extract_margin_hist(tgap, theta=1.0, bins=20):
@@ -57,18 +57,27 @@ def main():
         
     clean_data = torch.load(clean_gap_file, weights_only=True, map_location="cpu")
     clean_tgap = clean_data["temporal_gap"]  # shape (N, T, 704)
-    
-    print("Training Temporal AE on clean GAP trajectories...")
+
+    # Train only on the clean TRAIN split so the held-out clean frames used
+    # as evaluation negatives downstream were never seen by the AE.
+    clean_tgap_train, _ = split_train_eval(
+        clean_tgap, seq_lens=clean_data.get("seq_lens", None))
+
+    print(f"Training Temporal AE on clean GAP trajectories "
+          f"({len(clean_tgap_train)}/{len(clean_tgap)} train frames)...")
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    ae = train_temporal_ae_model(clean_tgap, epochs=100, device=device)
+    ae = train_temporal_ae_model(clean_tgap_train, epochs=100, device=device)
     ae.eval()
     
-    def extract_latent(tgap):
-        x = tgap.to(device)
+    def extract_latent(tgap, batch_size=4096):
+        # Process in batches — a full run is ~10 GB and would OOM the GPU
+        # if moved over in one piece.
+        outs = []
         with torch.no_grad():
-            z = ae.encoder(x)
-            z = z.view(z.shape[0], -1)  # Flatten (N, latent_dim)
-        return z.cpu().numpy()
+            for chunk in torch.split(tgap, batch_size):
+                z = ae.encoder(chunk.to(device))
+                outs.append(z.view(z.shape[0], -1).cpu())
+        return torch.cat(outs, dim=0).numpy()
         
     print("Extracting margin_hist and trajectory_latent for all runs...")
     

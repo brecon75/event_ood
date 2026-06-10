@@ -28,19 +28,73 @@ for _s in LAYER_SPECS:
 TOTAL_PHI_DIM   = _off
 MAX_FIT_SAMPLES = 3000
 PLIF_THETA      = 1.0
+TRAIN_RATIO     = getattr(cfg, "CLEAN_TRAIN_RATIO", 0.7)
 TABLE_DIR       = cfg.OUTPUT_DIR / "tables"
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared clean train/eval split.
+#
+# Frames within a sequence are temporally correlated, so random frame-level
+# splits leak near-duplicate frames between train and eval. Every script must
+# use these helpers: the split is a CONTIGUOUS cut, aligned to a sequence
+# boundary whenever per-sequence frame counts ('seq_lens' saved by extract.py)
+# are available. The cut is deterministic, so all detectors and analyses fit
+# and evaluate on exactly the same frames.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def split_boundary(n: int, train_ratio: float = TRAIN_RATIO, seq_lens=None) -> int:
+    """Row index where train ends and eval begins."""
+    cut = int(n * train_ratio)
+    if seq_lens:
+        edges = np.cumsum(seq_lens)
+        if edges[-1] == n:  # only trust seq_lens that actually match the array
+            pos = int(np.searchsorted(edges, cut))
+            cut = int(edges[min(pos, len(edges) - 1)])
+    if n > 1:
+        cut = max(1, min(cut, n - 1))  # never let train or eval be empty
+    else:
+        cut = n  # degenerate input: everything goes to train, eval is empty
+    return cut
+
+
+def split_train_eval(arr, train_ratio: float = TRAIN_RATIO, seq_lens=None):
+    """Split rows of `arr` into (train, eval) on whole sequences."""
+    cut = split_boundary(len(arr), train_ratio, seq_lens)
+    return arr[:cut], arr[cut:]
+
+
+def load_phi_seq_lens(run_name: str = "clean", artifact_dir=None):
+    """Per-sequence frame counts saved by extract.py, or None for legacy files.
+
+    `artifact_dir` defaults to the phi directory but any per-run artifact
+    directory (temporal_phi, spike, ...) works — they all share the metadata.
+    """
+    f = (artifact_dir or cfg.PHI_DIR) / f"{run_name}.pt"
+    if not f.exists():
+        return None
+    try:
+        d = torch.load(f, map_location="cpu", weights_only=True)
+        return d.get("seq_lens", None)
+    except Exception:
+        return None
+
+
 class LazyPhiDict:
-    def __init__(self):
-        self._cache = {}
-        self._available = {}
+    """Lazy loader for per-run phi arrays with a small LRU cache.
+
+    Caching every run would hold the entire benchmark (~tens of GB) in RAM,
+    so only the most recently used runs are kept; 'clean' is accessed
+    constantly and therefore stays resident in practice.
+    """
+
+    def __init__(self, cache_size: int = 3):
+        from collections import OrderedDict
+        self._cache = OrderedDict()
+        self._cache_size = max(1, cache_size)
+        self._available = {f.stem: f for f in sorted(cfg.PHI_DIR.glob("*.pt"))}
+        self._seq_lens = {}
         self.fast_mode = "--fast" in sys.argv
-        for f in sorted(cfg.PHI_DIR.glob("*.pt")):
-            try:
-                run_name = f.stem
-                self._available[run_name] = f
-            except Exception:
-                pass
 
     def __contains__(self, key):
         return key in self._available
@@ -52,21 +106,35 @@ class LazyPhiDict:
         if key not in self._available:
             raise KeyError(key)
         if key in self._cache:
+            self._cache.move_to_end(key)
             return self._cache[key]
-        
+
         f = self._available[key]
         try:
             d = torch.load(f, map_location="cpu", weights_only=True)
             arr = d["phi"].float().numpy()
+            self._seq_lens[key] = d.get("seq_lens", None)
             if self.fast_mode:
                 rng = np.random.default_rng(42)
                 n = min(len(arr), 2000)
-                arr = arr[rng.choice(len(arr), n, replace=False)]
+                # Sorted subsample keeps rows in temporal order; sequence
+                # boundaries no longer apply, so drop seq_lens in fast mode.
+                arr = arr[np.sort(rng.choice(len(arr), n, replace=False))]
+                self._seq_lens[key] = None
             self._cache[key] = arr
+            self._cache.move_to_end(key)
+            while len(self._cache) > self._cache_size:
+                self._cache.popitem(last=False)
             return arr
         except Exception as e:
             print(f"[!] Could not load {f.name}: {e}")
             raise e
+
+    def get_seq_lens(self, key):
+        """Per-sequence frame counts for a loaded run (None if unavailable)."""
+        if key not in self._seq_lens and key in self:
+            self[key]  # trigger load
+        return self._seq_lens.get(key, None)
 
     def keys(self):
         return self._available.keys()
@@ -150,6 +218,8 @@ def slice_phi_layer(phi: np.ndarray, layer_idx: int) -> np.ndarray:
     return phi[:, start:end]
 
 def slice_phi_stat(phi: np.ndarray, stat: str) -> np.ndarray:
+    if stat not in ("mu", "var", "kurtosis"):
+        raise ValueError(f"Unknown phi stat '{stat}'; expected mu/var/kurtosis")
     parts = []
     for spec in _valid_layers(phi.shape[1]):
         s, C = spec["phi_start"], spec["C"]
@@ -161,7 +231,7 @@ def slice_phi_stat(phi: np.ndarray, stat: str) -> np.ndarray:
             parts.append(layer_phi[:, min(C, lc): min(2 * C, lc)])
         elif stat == "kurtosis":
             parts.append(layer_phi[:, min(2 * C, lc): min(3 * C, lc)])
-    return np.concatenate(parts, axis=1) if parts else phi
+    return np.concatenate(parts, axis=1) if parts else phi[:, :0]
 
 def auroc_fpr95(y_true: np.ndarray, y_score: np.ndarray):
     if len(np.unique(y_true)) < 2:

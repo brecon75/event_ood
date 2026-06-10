@@ -9,6 +9,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vmem_benchmark import benchmark_config as cfg
 from analysis.representation_ablation import load_all_features, extract_representation
+from analysis.vmem_utils import split_train_eval, load_phi_seq_lens
 
 def main():
     print("Running cross-corruption generalization analysis...")
@@ -43,13 +44,11 @@ def main():
         
     X_train_corr = np.concatenate(X_train_corr, axis=0)
 
-    # Split clean data so training and evaluation use disjoint subsets
-    rng = np.random.default_rng(42)
-    n_clean = len(X_clean)
-    clean_perm = rng.permutation(n_clean)
-    clean_split = int(n_clean * 0.7)
-    X_clean_train = X_clean[clean_perm[:clean_split]]
-    X_clean_eval = X_clean[clean_perm[clean_split:]]
+    # Split clean data so training and evaluation use disjoint subsets.
+    # Sequence-aware contiguous split — random frame splits leak temporally
+    # correlated neighboring frames between train and eval.
+    X_clean_train, X_clean_eval = split_train_eval(
+        X_clean, seq_lens=load_phi_seq_lens("clean"))
 
     # Train binary classifier
     X_train = np.concatenate([X_clean_train, X_train_corr], axis=0)

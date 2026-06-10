@@ -23,7 +23,9 @@ def mahalanobis_scorer(clean: np.ndarray):
     try:
         cov = LedoitWolf().fit(fit)
         mu, P = cov.location_, cov.precision_
-    except Exception:
+    except Exception as e:
+        print(f"  [!] Mahalanobis: LedoitWolf fit failed ({e}); "
+              f"falling back to identity precision (plain squared L2).")
         mu = clean.mean(0)
         P  = np.eye(clean.shape[1])
 
@@ -189,14 +191,19 @@ def autoencoder_scorer(clean):
 def temporal_autoencoder_scorer(clean_trajs):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     ae = train_temporal_ae_model(clean_trajs, device=device)
-    
-    def score(trajs):
+
+    def score(trajs, batch_size=4096):
         if isinstance(trajs, torch.Tensor):
-            x = trajs.to(device)
+            x = trajs
         else:
-            x = prepare_temporal_ae_input(trajs).to(device)
+            x = prepare_temporal_ae_input(trajs)
+        # Batch the transfer + forward pass: a full run's GAP trajectories
+        # are ~10 GB and would OOM the GPU if moved over in one piece.
+        errs = []
         with torch.no_grad():
-            recon = ae(x)
-            err = ((x - recon) ** 2).mean(dim=(1, 2))
-        return err.cpu().numpy()
+            for chunk in torch.split(x, batch_size):
+                c = chunk.to(device)
+                recon = ae(c)
+                errs.append(((c - recon) ** 2).mean(dim=(1, 2)).cpu())
+        return torch.cat(errs).numpy()
     return score

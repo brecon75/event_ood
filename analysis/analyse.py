@@ -44,8 +44,10 @@ def main():
 
     n_corrupted = sum(1 for k in all_phi if k != "clean")
     print(f"Loaded {len(all_phi)} phi files  ({n_corrupted} corrupted runs).")
+    seq_lens = all_phi.get_seq_lens("clean")
+    n_seq_desc = f"{len(seq_lens)} sequences" if seq_lens else "unknown sequence count"
     print(f"Clean phi shape: {all_phi['clean'].shape}  "
-          f"(~{all_phi['clean'].shape[0]} frames from {all_phi['clean'].shape[0]//30:.0f} sequences)")
+          f"({all_phi['clean'].shape[0]} frames, {n_seq_desc})")
 
     # ── Level 1: original plots ──────────────────────────────────────────────
     plot_sensitivity_heatmap(all_phi)

@@ -11,6 +11,7 @@ from scipy.special import logsumexp
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vmem_benchmark import benchmark_config as cfg
+from analysis.vmem_utils import split_train_eval, load_phi_seq_lens
 
 def calc_fpr95(y_true, y_score):
     if len(np.unique(y_true)) < 2: return float("nan")
@@ -50,7 +51,7 @@ class DetectorMahalanobis:
             cov = LedoitWolf().fit(feats.numpy())
             self.mu = cov.location_
             self.P = cov.precision_
-        except:
+        except Exception:
             self.mu = feats.numpy().mean(0)
             self.P = np.eye(feats.shape[1])
     def score(self, feats, logits):
@@ -60,7 +61,7 @@ class DetectorMahalanobis:
 class DetectorKNN:
     def __init__(self, k=5): self.k = k; self.nn = None
     def fit(self, feats, logits):
-        k = min(self.k, feats.shape[0])  # clamp k to available samples
+        k = max(1, min(self.k, feats.shape[0]))  # clamp k to available samples
         self.nn = NearestNeighbors(n_neighbors=k, metric='euclidean').fit(feats.numpy())
     def score(self, feats, logits):
         dists, _ = self.nn.kneighbors(feats.numpy())
@@ -79,7 +80,7 @@ class DetectorReAct:
             cov = LedoitWolf().fit(f_clip)
             self.mu = cov.location_
             self.P = cov.precision_
-        except:
+        except Exception:
             self.mu = f_clip.mean(0)
             self.P = np.eye(f_clip.shape[1])
     def score(self, feats, logits):
@@ -119,7 +120,7 @@ class DetectorDICE:
             cov = LedoitWolf().fit(f_sp)
             self.mu = cov.location_
             self.P = cov.precision_
-        except:
+        except Exception:
             self.mu = f_sp.mean(0)
             self.P = np.eye(f_sp.shape[1])
     def score(self, feats, logits):
@@ -156,11 +157,25 @@ def evaluate_representation(rep_name, rep_dir):
         
     d = torch.load(clean_path, weights_only=True, map_location="cpu")
     c_feats, c_logits = d["feat"], d["logit"]
-    
+
+    if len(c_feats) < 10:
+        print(f"Skipping {rep_name}: only {len(c_feats)} clean samples — too "
+              f"few to split into train/eval. These look like legacy "
+              f"per-sequence features; re-run extract_ann_baselines.py to get "
+              f"per-frame features.")
+        return []
+
+    # Same sequence-aware 70/30 split used everywhere else: fit on the train
+    # portion, use only the HELD-OUT portion as clean negatives so detectors
+    # (especially kNN) never score their own fitting data.
+    seq_lens = load_phi_seq_lens("clean")
+    fit_feats, eval_feats = split_train_eval(c_feats, seq_lens=seq_lens)
+    fit_logits, eval_logits = split_train_eval(c_logits, seq_lens=seq_lens)
+
     for name, det in detectors.items():
-        det.fit(c_feats, c_logits)
-        
-    clean_scores = {name: det.score(c_feats, c_logits) for name, det in detectors.items()}
+        det.fit(fit_feats, fit_logits)
+
+    clean_scores = {name: det.score(eval_feats, eval_logits) for name, det in detectors.items()}
     
     results = []
     

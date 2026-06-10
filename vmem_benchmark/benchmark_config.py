@@ -30,7 +30,15 @@ PLOT_DIR   = OUTPUT_DIR / "plots"
 TEMPORAL_PHI_DIR = OUTPUT_DIR / "temporal_phi"
 ANN_DIR      = OUTPUT_DIR / "ann_features"
 SPIKE_DIR    = OUTPUT_DIR / "spike"
-DETECTOR_DIR = OUTPUT_DIR / "detectors"
+DETECTOR_DIR = OUTPUT_DIR / "detectors"      # fitted OOD detector models
+DET_OUT_DIR  = OUTPUT_DIR / "det_outputs"    # per-run YOLOX detection outputs
+
+# ---------------------------------------------------------------------------
+# Train/eval split of the clean run used by ALL detectors and analyses.
+# Frames within a sequence are temporally correlated, so the split is made on
+# whole sequences (contiguous rows), never by random frame shuffling.
+# ---------------------------------------------------------------------------
+CLEAN_TRAIN_RATIO = 0.7
 
 # ---------------------------------------------------------------------------
 # Inference settings

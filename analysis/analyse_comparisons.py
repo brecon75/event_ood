@@ -12,7 +12,8 @@ from vmem_benchmark import benchmark_config as cfg
 
 from analysis.vmem_utils import (
     LAYER_SPECS, TABLE_DIR, slice_phi_layer, slice_phi_stat,
-    auroc_fpr95, _get_present, _valid_layers
+    auroc_fpr95, _get_present, _valid_layers, split_train_eval,
+    load_phi_seq_lens,
 )
 from analysis.vmem_scorers import (
     mahalanobis_scorer, knn_scorer, gmm_scorer, pca_mahalanobis_scorer,
@@ -27,12 +28,17 @@ from analysis.analyse_plots import (
 # LEVEL 2 — Per-layer AUROC breakdown
 # ─────────────────────────────────────────────────────────────────────────────
 
-def split_clean(clean, train_ratio=0.7):
-    rng = np.random.default_rng(42)
-    indices = np.arange(len(clean))
-    rng.shuffle(indices)
-    split_idx = int(len(clean) * train_ratio)
-    return clean[indices[:split_idx]], clean[indices[split_idx:]]
+def split_clean(clean, train_ratio=0.7, seq_lens=None):
+    """Sequence-aware contiguous train/eval split of the clean frames.
+
+    Random frame-level shuffling would leak temporally adjacent (near-
+    duplicate) frames between fit and eval; see vmem_utils.split_train_eval.
+    When seq_lens is omitted we still fall back to a contiguous cut, which
+    crosses at most one sequence boundary.
+    """
+    if seq_lens is None:
+        seq_lens = load_phi_seq_lens("clean")
+    return split_train_eval(clean, train_ratio=train_ratio, seq_lens=seq_lens)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -333,53 +339,49 @@ def save_full_results_table(all_phi, detectors=None):
 # NEW RESEARCH IDEAS (IDEAS 3, 5, 7)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _run_seq_lens(all_phi, rn):
+    return all_phi.get_seq_lens(rn) if hasattr(all_phi, "get_seq_lens") else None
+
+
 def run_severity_regression(all_phi):
     print("\n======================================================")
     print(" LEVEL 7 - Severity Regression (Idea 5)")
     print("======================================================")
     from sklearn.linear_model import Ridge
     from sklearn.metrics import r2_score, mean_squared_error
-    from sklearn.model_selection import train_test_split
-    
+
     rows = []
-    all_X = []
-    all_y = []
-    
+    all_Xtr, all_ytr, all_Xte, all_yte = [], [], [], []
+
     for c_name in cfg.CORRUPTIONS:
-        c_X = []
-        c_y = []
+        # Split each run contiguously (sequence-aware) BEFORE pooling, so
+        # train and test never share frames from the same sequence.
+        c_Xtr, c_ytr, c_Xte, c_yte = [], [], [], []
         for sev in cfg.SEVERITIES:
             rn = f"{c_name}_L{sev}"
             if rn in all_phi:
                 features = all_phi[rn]
-                c_X.append(features)
-                c_y.append(np.full(len(features), sev))
-                
-        if not c_X:
-            continue
-            
-        c_X = np.concatenate(c_X, axis=0)
-        c_y = np.concatenate(c_y, axis=0)
-        
-        all_X.append(c_X)
-        all_y.append(c_y)
-        
-        # Need at least 2 samples to split
-        if len(c_X) < 2:
-            print(f"  {c_name:<25} (skipped: only {len(c_X)} sample)")
+                if len(features) < 2:
+                    continue
+                tr, te = split_train_eval(features, seq_lens=_run_seq_lens(all_phi, rn))
+                c_Xtr.append(tr);  c_ytr.append(np.full(len(tr), sev))
+                c_Xte.append(te);  c_yte.append(np.full(len(te), sev))
+
+        if not c_Xtr or not c_Xte:
             continue
 
-        test_size = max(1, int(0.3 * len(c_X)))
-        train_size = len(c_X) - test_size
-        if train_size < 1:
-            print(f"  {c_name:<25} (skipped: too few samples to split)")
-            continue
+        X_train = np.concatenate(c_Xtr, axis=0)
+        y_train = np.concatenate(c_ytr, axis=0)
+        X_test  = np.concatenate(c_Xte, axis=0)
+        y_test  = np.concatenate(c_yte, axis=0)
 
-        X_train, X_test, y_train, y_test = train_test_split(c_X, c_y, test_size=0.3, random_state=42)
+        all_Xtr.append(X_train);  all_ytr.append(y_train)
+        all_Xte.append(X_test);   all_yte.append(y_test)
+
         model = Ridge(alpha=1.0)
         model.fit(X_train, y_train)
         preds = model.predict(X_test)
-        
+
         if len(np.unique(y_test)) < 2:
             # Cannot compute meaningful r2 with one class
             r2, mse = float("nan"), float("nan")
@@ -388,21 +390,22 @@ def run_severity_regression(all_phi):
             mse = mean_squared_error(y_test, preds)
         print(f"  {c_name:<25} R^2 = {r2 if not np.isnan(r2) else 'N/A':>8}  MSE = {mse if not np.isnan(mse) else 'N/A'}")
         rows.append({"Scope": c_name, "R2": round(r2, 4) if not np.isnan(r2) else "", "MSE": round(mse, 4) if not np.isnan(mse) else ""})
+
+    if all_Xtr and all_Xte:
+        X_train = np.concatenate(all_Xtr, axis=0)
+        y_train = np.concatenate(all_ytr, axis=0)
+        X_test  = np.concatenate(all_Xte, axis=0)
+        y_test  = np.concatenate(all_yte, axis=0)
+
+        model = Ridge(alpha=1.0)
+        model.fit(X_train, y_train)
+        preds = model.predict(X_test)
+        r2 = r2_score(y_test, preds) if len(np.unique(y_test)) > 1 else float("nan")
+        mse = mean_squared_error(y_test, preds)
+        print(f"  {'Overall (All Corruptions)':<25} R^2 = {r2 if not np.isnan(r2) else 'N/A':>8}  MSE = {mse:.4f}")
+        rows.append({"Scope": "Overall", "R2": round(r2, 4) if not np.isnan(r2) else "", "MSE": round(mse, 4)})
         
-    if all_X:
-        all_X = np.concatenate(all_X, axis=0)
-        all_y = np.concatenate(all_y, axis=0)
-        
-        if len(all_X) >= 2:
-            X_train, X_test, y_train, y_test = train_test_split(all_X, all_y, test_size=0.3, random_state=42)
-            model = Ridge(alpha=1.0)
-            model.fit(X_train, y_train)
-            preds = model.predict(X_test)
-            r2 = r2_score(y_test, preds) if len(np.unique(y_test)) > 1 else float("nan")
-            mse = mean_squared_error(y_test, preds)
-            print(f"  {'Overall (All Corruptions)':<25} R^2 = {r2 if not np.isnan(r2) else 'N/A':>8}  MSE = {mse:.4f}")
-            rows.append({"Scope": "Overall", "R2": round(r2, 4) if not np.isnan(r2) else "", "MSE": round(mse, 4)})
-        
+        TABLE_DIR.mkdir(parents=True, exist_ok=True)
         with open(TABLE_DIR / "severity_regression.csv", "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=["Scope", "R2", "MSE"])
             w.writeheader()
@@ -416,41 +419,45 @@ def run_corruption_classification(all_phi):
     print("======================================================")
     from sklearn.linear_model import LogisticRegression
     from sklearn.metrics import accuracy_score, classification_report
-    from sklearn.model_selection import train_test_split
-    
-    X_list = [all_phi["clean"]]
-    y_list = [np.zeros(len(all_phi["clean"]))]
-    
+
     class_names = ["clean"] + list(cfg.CORRUPTIONS)
-    
+
+    # Split each run contiguously (sequence-aware) BEFORE pooling so train
+    # and test never contain frames from the same sequence of the same run.
+    Xtr_list, ytr_list, Xte_list, yte_list = [], [], [], []
+
+    clean_tr, clean_te = split_clean(all_phi["clean"],
+                                     seq_lens=_run_seq_lens(all_phi, "clean"))
+    Xtr_list.append(clean_tr);  ytr_list.append(np.zeros(len(clean_tr)))
+    Xte_list.append(clean_te);  yte_list.append(np.zeros(len(clean_te)))
+
     for idx, c_name in enumerate(cfg.CORRUPTIONS, start=1):
-        c_samples = []
+        c_tr, c_te = [], []
         for sev in cfg.SEVERITIES:
             rn = f"{c_name}_L{sev}"
             if rn in all_phi:
-                c_samples.append(all_phi[rn])
-        if c_samples:
-            c_samples = np.concatenate(c_samples, axis=0)
-            X_list.append(c_samples)
-            y_list.append(np.full(len(c_samples), idx))
-            
-    X = np.concatenate(X_list, axis=0)
-    y = np.concatenate(y_list, axis=0)
-    
-    # Guard: need at least 2 samples per class to stratify
-    unique_classes, counts = np.unique(y, return_counts=True)
-    if len(X) < 4 or any(c < 2 for c in counts):
+                feats = all_phi[rn]
+                if len(feats) < 2:
+                    continue
+                tr, te = split_train_eval(feats, seq_lens=_run_seq_lens(all_phi, rn))
+                c_tr.append(tr)
+                c_te.append(te)
+        if c_tr and c_te:
+            c_tr = np.concatenate(c_tr, axis=0)
+            c_te = np.concatenate(c_te, axis=0)
+            Xtr_list.append(c_tr);  ytr_list.append(np.full(len(c_tr), idx))
+            Xte_list.append(c_te);  yte_list.append(np.full(len(c_te), idx))
+
+    X_train = np.concatenate(Xtr_list, axis=0)
+    y_train = np.concatenate(ytr_list, axis=0)
+    X_test  = np.concatenate(Xte_list, axis=0)
+    y_test  = np.concatenate(yte_list, axis=0)
+
+    # Guard: need at least 2 classes and a non-trivial amount of data
+    if len(np.unique(y_train)) < 2 or len(X_train) < 4 or len(X_test) < 2:
         print("  Skipping: not enough samples per class for classification.")
         return
 
-    try:
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.3, random_state=42, stratify=y)
-    except ValueError:
-        # Fallback to non-stratified split
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.3, random_state=42)
-    
     model = LogisticRegression(max_iter=1000, random_state=42)
     model.fit(X_train, y_train)
     preds = model.predict(X_test)
@@ -458,16 +465,18 @@ def run_corruption_classification(all_phi):
     acc = accuracy_score(y_test, preds)
     print(f"  Accuracy (7-class classification): {acc:.4f}")
     
-    unique_y = np.unique(y)
+    unique_y = np.unique(np.concatenate([y_train, y_test]))
     target_names = [class_names[int(i)] for i in unique_y]
-    
-    report = classification_report(y_test, preds, target_names=target_names)
+
+    report = classification_report(y_test, preds, labels=unique_y, target_names=target_names)
     print("\n  Classification Report:\n")
     print(report)
-    
+
     plot_corruption_confusion_matrix(y_test, preds, target_names)
-    
-    report_dict = classification_report(y_test, preds, target_names=target_names, output_dict=True)
+
+    report_dict = classification_report(y_test, preds, labels=unique_y,
+                                        target_names=target_names, output_dict=True)
+    TABLE_DIR.mkdir(parents=True, exist_ok=True)
     with open(TABLE_DIR / "corruption_classification_report.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["Class", "Precision", "Recall", "F1-Score", "Support"])
         w.writeheader()

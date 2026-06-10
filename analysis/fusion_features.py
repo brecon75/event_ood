@@ -1,15 +1,12 @@
 import torch
 import numpy as np
-import pandas as pd
 from pathlib import Path
-from sklearn.linear_model import LogisticRegression
-import joblib
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vmem_benchmark import benchmark_config as cfg
 from analysis.vmem_scorers import mahalanobis_scorer
-from analysis.vmem_utils import slice_phi_layer
+from analysis.vmem_utils import slice_phi_layer, split_train_eval, load_phi_seq_lens
 
 
 def load_all_features():
@@ -50,19 +47,23 @@ def load_all_features():
             
     return feats
 
-def align_and_concat(feat_dict, keys):
+def align_and_concat(feat_dict, keys, run_name=""):
     """
-    Concatenate representations. If shapes (samples) mismatch,
-    slice to the minimum length (e.g. 50 samples for traj-based features).
+    Concatenate representations. If row counts mismatch, slice to the minimum
+    length. All representations are saved in the same frame order, so the
+    first min_len rows of each refer to the same frames.
     """
-    arrays = []
-    min_len = min(feat_dict[k].shape[0] for k in keys if k in feat_dict)
-    
-    for k in keys:
-        if k in feat_dict:
-            arrays.append(feat_dict[k][:min_len])
-    
-    return np.concatenate(arrays, axis=1) if arrays else None
+    present = [k for k in keys if k in feat_dict]
+    if not present:
+        return None
+    lens = {k: feat_dict[k].shape[0] for k in present}
+    min_len, max_len = min(lens.values()), max(lens.values())
+    if min_len < max_len:
+        print(f"  [!] {run_name}: fusing representations with mismatched row "
+              f"counts {lens}; truncating to {min_len} frames. If this is much "
+              f"smaller than the full run, a temporal feature file is likely "
+              f"missing (re-run extract_offline_features.py).")
+    return np.concatenate([feat_dict[k][:min_len] for k in present], axis=1)
 
 
 def main():
@@ -77,46 +78,43 @@ def main():
         print("Error: clean features not found.")
         return
         
-    # Task C: Layer Attention Fusion
-    # We will fit weights on clean vs all severities of 'hot_pixel' as a proxy for OOD,
-    # or just use uniform weights if strictly "train-clean only".
-    # Wait, the prompt says "Fit alpha_i using train-clean only".
-    # If we only have train-clean (no OOD), how do we learn alpha_i?
-    # Maybe unsupervised? e.g. inverse variance or PCA component?
-    # Let's just use uniform weights for now as a fallback, or fit a 1-class SVM and use dual coefficients?
-    # The simplest is to just average them if we can't do supervised, or fit PCA and take 1st component weights.
-    
-    # Actually, the user says "using train-clean only". I will compute the inverse variance of each layer's clean features to weight them, normalized to sum to 1.
+    # Task C: Layer Attention Fusion — unsupervised weights from clean data
+    # only: each layer is weighted by the inverse of its clean feature
+    # variance (stable layers get more weight), normalized to sum to 1.
+    # Weights are estimated on the clean TRAIN split so held-out clean frames
+    # stay untouched for downstream evaluation.
     print("Computing Layer Fusion weights (Task C)...")
     clean_phi = feats["clean"]["membrane_stats"]
-    
+    clean_phi_train, _ = split_train_eval(clean_phi, seq_lens=load_phi_seq_lens("clean"))
+
     alpha = []
     for i in range(4):
-        layer_feat = slice_phi_layer(clean_phi, i)
+        layer_feat = slice_phi_layer(clean_phi_train, i)
         if layer_feat.shape[1] > 0:
             var = layer_feat.var(axis=0).sum()
             alpha.append(1.0 / (var + 1e-8))
         else:
             alpha.append(0)
-            
+
     alpha = np.array(alpha)
     alpha = alpha / alpha.sum()
     print(f"Learned Layer Attention Weights: {alpha}")
-    
+
     # Task E: Per-Layer Mahalanobis Aggregation
-    # Learn weights S = sum(w_i * score_i) on train-clean.
+    # Learn weights S = sum(w_i * score_i) on the clean train split.
     print("Computing Per-Layer Mahalanobis weights (Task E)...")
     layer_scorers = []
     clean_layer_scores = []
-    
+
     for i in range(4):
-        layer_feat = slice_phi_layer(clean_phi, i)
+        layer_feat = slice_phi_layer(clean_phi_train, i)
         if layer_feat.shape[1] > 0:
             scorer = mahalanobis_scorer(layer_feat)
             layer_scorers.append(scorer)
             score_i = scorer(layer_feat)
             clean_layer_scores.append(score_i)
-            
+
+    w = None
     if clean_layer_scores:
         cls_matrix = np.stack(clean_layer_scores, axis=1) # (N, L)
         # Weight by inverse variance of clean scores
@@ -147,19 +145,19 @@ def main():
             if layer_feat.shape[1] > 0:
                 run_layer_scores.append(scorer(layer_feat))
         
-        if run_layer_scores:
+        if run_layer_scores and w is not None:
             rls_matrix = np.stack(run_layer_scores, axis=1) # (N, L)
             layer_score_fusion = (rls_matrix * w).sum(axis=1)
             run_feats["layer_score_fusion"] = layer_score_fusion
-            
-        # Task D: Unified Membrane Representation (membrane_fused)
+
+        # Task D: Unified Membrane Representation (membrane_fused).
+        # membrane_temporal (handcrafted temporal phi) already includes the
+        # threshold-margin features.
         keys_to_fuse = ["membrane_stats", "membrane_margin_hist", "membrane_temporal_latent"]
-        # In the original vmem, threshold features are part of temporal? "threshold features" -> load_traj_as_temporal_phi gives threshold margin features.
-        # So membrane_temporal contains threshold features.
         if "membrane_temporal" in run_feats:
             keys_to_fuse.append("membrane_temporal")
-            
-        membrane_fused = align_and_concat(run_feats, keys_to_fuse)
+
+        membrane_fused = align_and_concat(run_feats, keys_to_fuse, run_name=run_name)
         if membrane_fused is not None:
             run_feats["membrane_fused"] = membrane_fused
             

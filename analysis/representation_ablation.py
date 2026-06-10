@@ -11,7 +11,7 @@ from sklearn.metrics import roc_auc_score, average_precision_score, roc_curve
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vmem_benchmark import benchmark_config as cfg
-from analysis.vmem_utils import slice_phi_stat
+from analysis.vmem_utils import slice_phi_stat, split_train_eval, load_phi_seq_lens
 
 def calc_fpr95(y_true, y_score):
     fpr, tpr, thresholds = roc_curve(y_true, y_score)
@@ -38,12 +38,22 @@ def load_all_features():
     ann = {}
     if cfg.ANN_DIR.exists():
         for f in cfg.ANN_DIR.glob("*.pt"):
-            ann[f.stem] = {k: v.numpy() for k, v in torch.load(f, weights_only=True).items()}
+            ann[f.stem] = {k: v.numpy()
+                           for k, v in torch.load(f, weights_only=True).items()
+                           if isinstance(v, torch.Tensor)}
         
     spike = {}
     if cfg.SPIKE_DIR.exists():
         for f in cfg.SPIKE_DIR.glob("*.pt"):
-            spike[f.stem] = {k: v.numpy() for k, v in torch.load(f, weights_only=True).items()}
+            d = torch.load(f, weights_only=True)
+            spike[f.stem] = {k: v.numpy() for k, v in d.items()
+                             if isinstance(v, torch.Tensor)}
+            # Legacy spike files (extracted before monitor.py clamped the
+            # spike rate) contain NaN entropy where p was exactly 0 or 1;
+            # the binary-entropy limit there is 0.
+            if "spike_entropy" in spike[f.stem]:
+                spike[f.stem]["spike_entropy"] = np.nan_to_num(
+                    spike[f.stem]["spike_entropy"], nan=0.0)
         
     # we don't necessarily have all representations for all runs if a run failed
     valid_runs = set(phi.keys())
@@ -113,20 +123,19 @@ def main():
     ]
     
     results = []
-    
+    clean_seq_lens = load_phi_seq_lens("clean")
+
     for rep in tqdm(reps, desc="Representation Ablation"):
         train_feat = extract_representation(all_feats['clean'], rep)
         if train_feat is None:
             print(f"Skipping {rep} (not found)")
             continue
 
-        # 70/30 split: fit on train portion, score hold-out clean as negatives
-        n = len(train_feat)
-        split = int(n * 0.7)
-        rng = np.random.default_rng(42)
-        perm = rng.permutation(n)
-        train_feat_fit = train_feat[perm[:split]]
-        clean_test_feat = train_feat[perm[split:]]
+        # Sequence-aware 70/30 split: fit on the train portion, score the
+        # held-out clean frames as negatives. A random frame-level split would
+        # leak near-identical neighboring frames between fit and eval.
+        train_feat_fit, clean_test_feat = split_train_eval(
+            train_feat, seq_lens=clean_seq_lens)
         clean_scores = get_mahalanobis_scores(train_feat_fit, clean_test_feat)
 
         for run_name, feats in all_feats.items():

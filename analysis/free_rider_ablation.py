@@ -27,7 +27,7 @@ from vmem_benchmark.corruption_wrap import apply_corruption_to_tensor
 from spikingjelly.clock_driven import functional
 
 from analysis.vmem_scorers import mahalanobis_scorer
-from analysis.vmem_utils import auroc_fpr95, TABLE_DIR
+from analysis.vmem_utils import auroc_fpr95, split_train_eval, TABLE_DIR
 from analysis.analyse_plots import plot_free_rider_ablation
 
 def extract_snn_phi(module, backbone, monitor, hist_torch, device, desc="Extracting Vmem", batch_size=1):
@@ -76,6 +76,8 @@ def extract_raw_input_stats(hist_torch):
 
 
 def randomize_weights(backbone):
+    import math
+    from spikingjelly.clock_driven.neuron import MultiStepParametricLIFNode
     for m in backbone.modules():
         if isinstance(m, (torch.nn.Conv2d, torch.nn.Conv1d, torch.nn.Linear)):
             torch.nn.init.normal_(m.weight, mean=0.0, std=0.02)
@@ -86,6 +88,16 @@ def randomize_weights(backbone):
                 torch.nn.init.constant_(m.weight, 1.0)
             if m.bias is not None:
                 torch.nn.init.constant_(m.bias, 0.0)
+            # Reset the trained running statistics too — otherwise the
+            # "Random SNN" condition still carries learned normalization.
+            if m.running_mean is not None:
+                torch.nn.init.constant_(m.running_mean, 0.0)
+            if m.running_var is not None:
+                torch.nn.init.constant_(m.running_var, 1.0)
+        elif isinstance(m, MultiStepParametricLIFNode):
+            # Reset the learned membrane time constant to its init (tau=2).
+            if hasattr(m, "w") and isinstance(m.w, torch.nn.Parameter):
+                torch.nn.init.constant_(m.w, -math.log(2.0 - 1.0))
 
 
 def main():
@@ -129,10 +141,10 @@ def main():
         hist_clean = torch.from_numpy(hist_np)
         clean_inputs.append(hist_clean)
         
-        hist_hot = apply_corruption_to_tensor(hist_clean, "hot_pixel", 5)
+        hist_hot = apply_corruption_to_tensor(hist_clean, "hot_pixel", 5, seed=[42, i])
         hot_inputs.append(hist_hot)
-        
-        hist_flood = apply_corruption_to_tensor(hist_clean, "event_flood", 5)
+
+        hist_flood = apply_corruption_to_tensor(hist_clean, "event_flood", 5, seed=[42, i])
         flood_inputs.append(hist_flood)
         
     print("\n[Condition C] Extracting Raw Input Stats...")
@@ -165,50 +177,27 @@ def main():
     if device == "cuda":
         torch.cuda.empty_cache()
 
-    # Fit Mahalanobis scorer and compute AUROC for each condition
-    results = {}
-    
-    # 1. Condition A (Trained SNN)
-    scorer_trained = mahalanobis_scorer(clean_trained)
-    scores_trained_clean = scorer_trained(clean_trained)
-    
-    yt_hot = np.concatenate([np.zeros(len(scores_trained_clean)), np.ones(len(hot_trained))])
-    ys_hot_trained = np.concatenate([scores_trained_clean, scorer_trained(hot_trained)])
-    a_hot_trained, _ = auroc_fpr95(yt_hot, ys_hot_trained)
-    
-    yt_flood = np.concatenate([np.zeros(len(scores_trained_clean)), np.ones(len(flood_trained))])
-    ys_flood_trained = np.concatenate([scores_trained_clean, scorer_trained(flood_trained)])
-    a_flood_trained, _ = auroc_fpr95(yt_flood, ys_flood_trained)
-    
-    results['Trained SNN'] = {'hot_pixel': a_hot_trained, 'event_flood': a_flood_trained}
+    # Fit Mahalanobis scorer and compute AUROC for each condition.
+    # The clean frames are split contiguously: the scorer is fitted on the
+    # train portion and only the HELD-OUT portion is scored as negatives, so
+    # the AUROC is not biased by scoring the scorer's own training data.
+    def condition_auroc(clean_X, hot_X, flood_X):
+        clean_fit, clean_eval = split_train_eval(clean_X)
+        scorer = mahalanobis_scorer(clean_fit)
+        clean_scores = scorer(clean_eval)
+        out = {}
+        for label, X in (("hot_pixel", hot_X), ("event_flood", flood_X)):
+            yt = np.concatenate([np.zeros(len(clean_scores)), np.ones(len(X))])
+            ys = np.concatenate([clean_scores, scorer(X)])
+            a, _ = auroc_fpr95(yt, ys)
+            out[label] = a
+        return out
 
-    # 2. Condition B (Random SNN)
-    scorer_random = mahalanobis_scorer(clean_random)
-    scores_random_clean = scorer_random(clean_random)
-
-    yt_hot_random = np.concatenate([np.zeros(len(scores_random_clean)), np.ones(len(hot_random))])
-    ys_hot_random = np.concatenate([scores_random_clean, scorer_random(hot_random)])
-    a_hot_random, _ = auroc_fpr95(yt_hot_random, ys_hot_random)
-
-    yt_flood_random = np.concatenate([np.zeros(len(scores_random_clean)), np.ones(len(flood_random))])
-    ys_flood_random = np.concatenate([scores_random_clean, scorer_random(flood_random)])
-    a_flood_random, _ = auroc_fpr95(yt_flood_random, ys_flood_random)
-
-    results['Random SNN'] = {'hot_pixel': a_hot_random, 'event_flood': a_flood_random}
-
-    # 3. Condition C (Raw Input Stats)
-    scorer_raw = mahalanobis_scorer(clean_raw)
-    scores_raw_clean = scorer_raw(clean_raw)
-
-    yt_hot_raw = np.concatenate([np.zeros(len(scores_raw_clean)), np.ones(len(hot_raw))])
-    ys_hot_raw = np.concatenate([scores_raw_clean, scorer_raw(hot_raw)])
-    a_hot_raw, _ = auroc_fpr95(yt_hot_raw, ys_hot_raw)
-
-    yt_flood_raw = np.concatenate([np.zeros(len(scores_raw_clean)), np.ones(len(flood_raw))])
-    ys_flood_raw = np.concatenate([scores_raw_clean, scorer_raw(flood_raw)])
-    a_flood_raw, _ = auroc_fpr95(yt_flood_raw, ys_flood_raw)
-    
-    results['Raw Input Stats'] = {'hot_pixel': a_hot_raw, 'event_flood': a_flood_raw}
+    results = {
+        'Trained SNN':     condition_auroc(clean_trained, hot_trained, flood_trained),
+        'Random SNN':      condition_auroc(clean_random, hot_random, flood_random),
+        'Raw Input Stats': condition_auroc(clean_raw, hot_raw, flood_raw),
+    }
 
     # Print comparative results
     print("\n=======================================================")

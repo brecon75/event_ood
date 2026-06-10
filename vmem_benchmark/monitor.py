@@ -4,15 +4,24 @@ monitor.py — VmemMonitor for SpikingJelly MultiStepParametricLIFNode.
 Hooks into PLIF layers to collect membrane potential 'v' and compute
 phi vectors [mean, variance, excess_kurtosis] with Global Average Pooling.
 
-Shape contract
---------------
-spike_model.py reshapes input (B, 20, H, W) → (B, 2, 10, H, W) then passes
+Shape contract (verified against spikingjelly.clock_driven.neuron source)
+-------------------------------------------------------------------------
+spike_model.py reshapes the input (B, 20, H, W) → (B, 10, 2, H, W) and feeds
 it to features_01 / features_23 (SeqToANNContainer + MultiStepParametricLIFNode).
-SpikingJelly's MultiStepParametricLIFNode in clock_driven mode stores its
-membrane potential as module.v with shape (T, C, H, W) — the batch dim is
-folded into the time sequence by the backbone's own reshape.
+SpikingJelly's multi-step nodes unroll dim 0 as time and store:
+  module.v_seq — membrane at ALL unrolled steps, shape (dim0, *rest)
+  module.v     — membrane at the LAST unrolled step only, shape (*rest)
 
-To keep all downstream code simple and correct, _make_hook canonicalises
+With the mandatory BATCH_SIZE=1, dim 0 (the batch axis) has length 1, so the
+node performs exactly ONE integration step whose "neuron batch" is the 10
+time bins. module.v therefore has shape (10, C, H, W): the leading axis is
+the 10 time bins, each processed by an independent single LIF step (reset
+every frame). This is what downstream code treats as the "T" axis of phi.
+
+NOTE: this only holds for B=1 — with B>1 module.v would be the membrane of
+the LAST sample only, silently corrupting phi. extract.py enforces B=1.
+
+To keep all downstream code simple and consistent, _make_hook canonicalises
 every captured tensor to (T, 1, C, H, W) immediately after capture.
 """
 import torch
@@ -78,7 +87,12 @@ class VmemMonitor:
                 if spikes.ndim == 4:
                     spikes = spikes.unsqueeze(1)
                 elif spikes.ndim == 5:
-                    pass
+                    # spike_seq has shape (1, 10, C, H, W): dim 0 is the single
+                    # multistep step (B=1), dim 1 the 10 time bins. Canonicalise
+                    # to (T=10, B=1, C, H, W) so spike rows align 1:1 with the
+                    # phi rows (one per frame) instead of 10 per frame.
+                    if spikes.shape[0] == 1:
+                        spikes = spikes.flatten(0, 1).unsqueeze(1)
                 else:
                     return
                 self._spikes[idx].append(spikes)

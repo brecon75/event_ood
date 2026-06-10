@@ -17,7 +17,8 @@ from analysis.analyse_comparisons import (
     run_per_layer_auroc_table, run_statwise_ablation,
     run_detector_comparison, run_spearman_severity,
     save_full_results_table, run_severity_regression,
-    run_corruption_classification, run_conformal_prediction
+    run_corruption_classification, run_conformal_prediction,
+    _build_detectors, split_clean,
 )
 from analysis.analyse_temporal import run_temporal_analysis
 
@@ -58,7 +59,10 @@ def main():
 
     # ── Level 3: detector comparison ────────────────────────────────────────
     if n_corrupted > 0:
-        run_detector_comparison(all_phi)
+        # Build all 7 detectors once — Flow and AE training is expensive
+        clean_train, _ = split_clean(all_phi["clean"])
+        detectors = _build_detectors(clean_train)
+        run_detector_comparison(all_phi, detectors=detectors)
 
     # ── Level 4: temporal features from trajs ───────────────────────────────
     run_temporal_analysis(all_phi)
@@ -66,7 +70,7 @@ def main():
     # ── Level 5: Spearman + full table ──────────────────────────────────────
     if n_corrupted > 0:
         run_spearman_severity(all_phi)
-        save_full_results_table(all_phi)
+        save_full_results_table(all_phi, detectors=detectors)
 
     # ── Ideas 3, 5, 6, 7: PCA, Severity Regression, Classification, Conformal ──
     if n_corrupted > 0:

@@ -147,10 +147,26 @@ def run_statwise_ablation(all_phi):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Shared detector factory — call once, pass to both comparison functions
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_detectors(clean_train):
+    return {
+        "Mahalanobis":      mahalanobis_scorer(clean_train),
+        "kNN (k=5)":        knn_scorer(clean_train, k=5),
+        "GMM":              gmm_scorer(clean_train, n_components=5),
+        "PCA-Mahal":        pca_mahalanobis_scorer(clean_train, n_components=50),
+        "One-Class SVM":    ocsvm_scorer(clean_train),
+        "Normalizing Flow": normalizing_flow_scorer(clean_train, n_components=50),
+        "Autoencoder":      autoencoder_scorer(clean_train),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # LEVEL 3 — Detector comparison (Mahal / kNN / GMM / PCA-Mahal)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_detector_comparison(all_phi):
+def run_detector_comparison(all_phi, detectors=None):
     print("\n======================================================")
     print(" LEVEL 3 - Detector Comparison")
     print("======================================================")
@@ -162,16 +178,7 @@ def run_detector_comparison(all_phi):
         return
 
     clean_train, clean_test = split_clean(clean)
-
-    DETECTORS = {
-        "Mahalanobis":  mahalanobis_scorer(clean_train),
-        "kNN (k=5)":    knn_scorer(clean_train, k=5),
-        "GMM":          gmm_scorer(clean_train, n_components=5),
-        "PCA-Mahal":    pca_mahalanobis_scorer(clean_train, n_components=50),
-        "One-Class SVM": ocsvm_scorer(clean_train),
-        "Normalizing Flow": normalizing_flow_scorer(clean_train, n_components=50),
-        "Autoencoder":   autoencoder_scorer(clean_train),
-    }
+    DETECTORS = detectors if detectors is not None else _build_detectors(clean_train)
 
     summary = {}
     per_corr = {det: {} for det in DETECTORS}
@@ -270,22 +277,14 @@ def run_spearman_severity(all_phi):
 # FULL RESULTS TABLE  (all detectors × all runs)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def save_full_results_table(all_phi):
+def save_full_results_table(all_phi, detectors=None):
     print("\n======================================================")
     print(" Generating full results table (all detectors)...")
     print("======================================================")
 
     clean = all_phi["clean"]
     clean_train, clean_test = split_clean(clean)
-    DETECTORS = {
-        "Mahalanobis":      mahalanobis_scorer(clean_train),
-        "kNN":              knn_scorer(clean_train, k=5),
-        "GMM":              gmm_scorer(clean_train, n_components=5),
-        "PCA-Mahal":        pca_mahalanobis_scorer(clean_train, n_components=50),
-        "One-Class SVM":    ocsvm_scorer(clean_train),
-        "Normalizing Flow": normalizing_flow_scorer(clean_train, n_components=50),
-        "Autoencoder":      autoencoder_scorer(clean_train),
-    }
+    DETECTORS = detectors if detectors is not None else _build_detectors(clean_train)
 
     clean_scores = {}
     for det_name, scorer in DETECTORS.items():

@@ -117,8 +117,8 @@ def pca_mahalanobis_scorer(clean: np.ndarray, n_components: int = 50):
     pca = PCA(n_components=nc, random_state=42)
     pca.fit(fit)
     
-    clean_proj = pca.transform(clean)
-    base_score_fn = mahalanobis_scorer(clean_proj)
+    fit_proj = pca.transform(fit)
+    base_score_fn = mahalanobis_scorer(fit_proj)
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
     pca_mean_t = torch.from_numpy(pca.mean_).float().to(device)

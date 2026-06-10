@@ -26,16 +26,14 @@ def extract_margin_hist(tgap, theta=1.0, bins=20):
         V = tgap[:, :, c_offset : c_offset + C]  # (N, T, C)
         c_offset += C
         
-        margin = V - theta
-        margin = margin.reshape(N, -1)  # (N, T*C)
-        
-        hists = []
-        for n in range(N):
-            h = torch.histc(margin[n], bins=bins, min=-2*theta, max=2*theta)
-            h = h / (h.sum() + 1e-8)
-            hists.append(h)
-            
-        layer_hists = torch.stack(hists, dim=0)  # (N, bins)
+        margin = (V - theta).reshape(N, -1)  # (N, T*C)
+
+        # Vectorised histogram over all N samples in one call
+        boundaries = torch.linspace(-2 * theta, 2 * theta, bins + 1)[1:-1]  # (bins-1,) interior edges
+        bin_idx = torch.bucketize(margin.contiguous(), boundaries)  # (N, T*C), values in [0, bins-1]
+        layer_hists = torch.zeros(N, bins)
+        layer_hists.scatter_add_(1, bin_idx, torch.ones_like(margin))
+        layer_hists = layer_hists / (layer_hists.sum(dim=1, keepdim=True) + 1e-8)
         parts.append(layer_hists)
         
     if not parts:

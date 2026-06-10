@@ -160,7 +160,7 @@ def prepare_temporal_ae_input(trajs):
     return clean_x
 
 
-def train_temporal_ae_model(clean_trajs, epochs=200, lr=1e-3, device="cuda"):
+def train_temporal_ae_model(clean_trajs, epochs=200, lr=1e-3, batch_size=64, device="cuda"):
     fast_mode = "--fast" in sys.argv
     if fast_mode:
         epochs = min(epochs, 2)
@@ -170,14 +170,20 @@ def train_temporal_ae_model(clean_trajs, epochs=200, lr=1e-3, device="cuda"):
         clean_x = prepare_temporal_ae_input(clean_trajs)
     ae = TemporalAutoencoder(dim=clean_x.shape[2]).to(device)
     optimizer = optim.Adam(ae.parameters(), lr=lr)
-    dataset = clean_x.to(device)
+    loader = torch.utils.data.DataLoader(
+        torch.utils.data.TensorDataset(clean_x),
+        batch_size=batch_size,
+        shuffle=True,
+    )
     ae.train()
     pbar = tqdm(range(epochs), desc="Training Temporal AE", leave=False, disable=epochs <= 1)
     for _ in pbar:
-        optimizer.zero_grad()
-        recon = ae(dataset)
-        loss = nn.MSELoss()(recon, dataset)
-        loss.backward()
-        optimizer.step()
+        for (batch,) in loader:
+            batch = batch.to(device)
+            optimizer.zero_grad()
+            recon = ae(batch)
+            loss = nn.MSELoss()(recon, batch)
+            loss.backward()
+            optimizer.step()
     ae.eval()
     return ae

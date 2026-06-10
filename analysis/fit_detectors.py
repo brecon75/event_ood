@@ -5,7 +5,7 @@ import numpy as np
 import joblib
 from tqdm import tqdm
 from pathlib import Path
-from sklearn.covariance import EmpiricalCovariance
+from sklearn.covariance import LedoitWolf
 from sklearn.neighbors import NearestNeighbors
 from sklearn.mixture import GaussianMixture
 from sklearn.svm import OneClassSVM
@@ -77,7 +77,7 @@ def main():
     
     print("Fitting Mahalanobis...")
     try:
-        cov = EmpiricalCovariance().fit(X_train)
+        cov = LedoitWolf().fit(X_train)
         detectors['mahalanobis'] = cov
     except Exception as e:
         print(f"Mahalanobis failed: {e}")
@@ -94,14 +94,14 @@ def main():
     print("Fitting GMM...")
     try:
         n_comp = min(5, X_train.shape[0])  # clamp components to available samples
-        gmm = GaussianMixture(n_components=n_comp, covariance_type='diag').fit(X_train)
+        gmm = GaussianMixture(n_components=n_comp, covariance_type='full', random_state=42).fit(X_train)
         detectors['gmm'] = gmm
     except Exception as e:
         print(f"GMM failed: {e}")
         
     print("Fitting OCSVM... (might be slow)")
     # sample for SVM if too large
-    X_svm = X_train[np.random.choice(X_train.shape[0], min(X_train.shape[0], 5000), replace=False)]
+    X_svm = X_train[np.random.default_rng(42).choice(X_train.shape[0], min(X_train.shape[0], 5000), replace=False)]
     ocsvm = OneClassSVM(gamma='auto').fit(X_svm)
     detectors['ocsvm'] = ocsvm
     

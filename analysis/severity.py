@@ -53,20 +53,21 @@ def main():
             split = int(n * 0.7)
             rng = np.random.default_rng(42)
             perm = rng.permutation(n)
-            clean_scores = get_mahalanobis_scores(train_feat[perm[:split]], train_feat[perm[split:]])
-            
+            train_fit = train_feat[perm[:split]]
+            clean_scores = get_mahalanobis_scores(train_fit, train_feat[perm[split:]])
+
             all_scores = list(clean_scores)
             all_severities = [0] * len(clean_scores)
-            
+
             for sev in cfg.SEVERITIES:
                 run_name = f"{c_name}_L{sev}"
                 if run_name not in all_feats: continue
-                
+
                 test_feat = extract_representation(all_feats[run_name], rep)
                 if test_feat is None: continue
-                
+
                 try:
-                    scores = get_mahalanobis_scores(train_feat, test_feat)
+                    scores = get_mahalanobis_scores(train_fit, test_feat)
                     all_scores.extend(scores)
                     all_severities.extend([sev] * len(scores))
                 except:

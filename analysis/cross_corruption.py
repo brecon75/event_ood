@@ -42,10 +42,18 @@ def main():
         return
         
     X_train_corr = np.concatenate(X_train_corr, axis=0)
-    
+
+    # Split clean data so training and evaluation use disjoint subsets
+    rng = np.random.default_rng(42)
+    n_clean = len(X_clean)
+    clean_perm = rng.permutation(n_clean)
+    clean_split = int(n_clean * 0.7)
+    X_clean_train = X_clean[clean_perm[:clean_split]]
+    X_clean_eval = X_clean[clean_perm[clean_split:]]
+
     # Train binary classifier
-    X_train = np.concatenate([X_clean, X_train_corr], axis=0)
-    y_train = np.concatenate([np.zeros(len(X_clean)), np.ones(len(X_train_corr))])
+    X_train = np.concatenate([X_clean_train, X_train_corr], axis=0)
+    y_train = np.concatenate([np.zeros(len(X_clean_train)), np.ones(len(X_train_corr))])
     
     print("Training binary detector on clean vs hot_pixel...")
     clf = LogisticRegression(max_iter=1000)
@@ -68,8 +76,8 @@ def main():
             X_test_corr = extract_representation(all_feats[run_name], rep)
             if X_test_corr is None: continue
             
-            X_test = np.concatenate([X_clean, X_test_corr], axis=0)
-            y_test = np.concatenate([np.zeros(len(X_clean)), np.ones(len(X_test_corr))])
+            X_test = np.concatenate([X_clean_eval, X_test_corr], axis=0)
+            y_test = np.concatenate([np.zeros(len(X_clean_eval)), np.ones(len(X_test_corr))])
             
             y_score = clf.predict_proba(X_test)[:, 1]
             auroc = roc_auc_score(y_test, y_score)

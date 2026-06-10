@@ -185,24 +185,28 @@ def main():
     # 2. Condition B (Random SNN)
     scorer_random = mahalanobis_scorer(clean_random)
     scores_random_clean = scorer_random(clean_random)
-    
+
+    yt_hot_random = np.concatenate([np.zeros(len(scores_random_clean)), np.ones(len(hot_random))])
     ys_hot_random = np.concatenate([scores_random_clean, scorer_random(hot_random)])
-    a_hot_random, _ = auroc_fpr95(yt_hot, ys_hot_random)
-    
+    a_hot_random, _ = auroc_fpr95(yt_hot_random, ys_hot_random)
+
+    yt_flood_random = np.concatenate([np.zeros(len(scores_random_clean)), np.ones(len(flood_random))])
     ys_flood_random = np.concatenate([scores_random_clean, scorer_random(flood_random)])
-    a_flood_random, _ = auroc_fpr95(yt_flood, ys_flood_random)
-    
+    a_flood_random, _ = auroc_fpr95(yt_flood_random, ys_flood_random)
+
     results['Random SNN'] = {'hot_pixel': a_hot_random, 'event_flood': a_flood_random}
 
     # 3. Condition C (Raw Input Stats)
     scorer_raw = mahalanobis_scorer(clean_raw)
     scores_raw_clean = scorer_raw(clean_raw)
-    
+
+    yt_hot_raw = np.concatenate([np.zeros(len(scores_raw_clean)), np.ones(len(hot_raw))])
     ys_hot_raw = np.concatenate([scores_raw_clean, scorer_raw(hot_raw)])
-    a_hot_raw, _ = auroc_fpr95(yt_hot, ys_hot_raw)
-    
+    a_hot_raw, _ = auroc_fpr95(yt_hot_raw, ys_hot_raw)
+
+    yt_flood_raw = np.concatenate([np.zeros(len(scores_raw_clean)), np.ones(len(flood_raw))])
     ys_flood_raw = np.concatenate([scores_raw_clean, scorer_raw(flood_raw)])
-    a_flood_raw, _ = auroc_fpr95(yt_flood, ys_flood_raw)
+    a_flood_raw, _ = auroc_fpr95(yt_flood_raw, ys_flood_raw)
     
     results['Raw Input Stats'] = {'hot_pixel': a_hot_raw, 'event_flood': a_flood_raw}
 

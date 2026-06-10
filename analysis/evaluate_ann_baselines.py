@@ -15,8 +15,8 @@ from vmem_benchmark import benchmark_config as cfg
 def calc_fpr95(y_true, y_score):
     if len(np.unique(y_true)) < 2: return float("nan")
     fpr, tpr, _ = roc_curve(y_true, y_score)
-    idx = np.searchsorted(tpr, 0.95)
-    return fpr[min(idx, len(fpr) - 1)]
+    idx = int(np.argmax(tpr >= 0.95))
+    return fpr[idx]
 
 class DetectorMSP:
     def __init__(self): pass
@@ -70,22 +70,22 @@ class DetectorReAct:
     def __init__(self, p=0.9):
         self.p = p
         self.c = None
+        self.mu = None
+        self.P = None
     def fit(self, feats, logits):
         self.c = np.percentile(feats.numpy(), self.p * 100)
-    def score(self, feats, logits):
-        # ReAct truncates features. But we can't easily re-compute logits without the fc layer.
-        # So we just evaluate energy on the clipped features using pseudo-weights?
-        # Actually, since we only have penultimate, ReAct usually applies clipping before the classification head.
-        # We don't have the head weights saved in extract! 
-        # We can approximate by just clipping the features and using Mahalanobis.
         f_clip = np.clip(feats.numpy(), a_min=None, a_max=self.c)
         try:
             cov = LedoitWolf().fit(f_clip)
-            mu, P = cov.location_, cov.precision_
+            self.mu = cov.location_
+            self.P = cov.precision_
         except:
-            mu, P = f_clip.mean(0), np.eye(f_clip.shape[1])
-        d = f_clip - mu
-        return np.einsum("ni,ij,nj->n", d, P, d)
+            self.mu = f_clip.mean(0)
+            self.P = np.eye(f_clip.shape[1])
+    def score(self, feats, logits):
+        f_clip = np.clip(feats.numpy(), a_min=None, a_max=self.c)
+        d = f_clip - self.mu
+        return np.einsum("ni,ij,nj->n", d, self.P, d)
 
 class DetectorViM:
     def __init__(self):
@@ -108,20 +108,26 @@ class DetectorViM:
         return norm - energy
 
 class DetectorDICE:
-    def __init__(self): pass
-    def fit(self, feats, logits): pass
-    def score(self, feats, logits):
-        # DICE sparsifies weights. We don't have weights here. We will just use sparsified features + Mahalanobis.
+    def __init__(self):
+        self.mu = None
+        self.P = None
+    def fit(self, feats, logits):
         f = feats.numpy()
         mask = f > np.percentile(f, 90, axis=1, keepdims=True)
         f_sp = f * mask
         try:
             cov = LedoitWolf().fit(f_sp)
-            mu, P = cov.location_, cov.precision_
+            self.mu = cov.location_
+            self.P = cov.precision_
         except:
-            mu, P = f_sp.mean(0), np.eye(f_sp.shape[1])
-        d = f_sp - mu
-        return np.einsum("ni,ij,nj->n", d, P, d)
+            self.mu = f_sp.mean(0)
+            self.P = np.eye(f_sp.shape[1])
+    def score(self, feats, logits):
+        f = feats.numpy()
+        mask = f > np.percentile(f, 90, axis=1, keepdims=True)
+        f_sp = f * mask
+        d = f_sp - self.mu
+        return np.einsum("ni,ij,nj->n", d, self.P, d)
 
 class DetectorGradNorm:
     def __init__(self): pass

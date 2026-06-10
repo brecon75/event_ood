@@ -125,8 +125,12 @@ def plot_auroc_vs_severity(all_phi):
         return
 
     clean = all_phi["clean"]
-    scorer = mahalanobis_scorer(clean)
-    cs = scorer(clean)
+    n = len(clean)
+    split = int(n * 0.7)
+    rng = np.random.default_rng(42)
+    perm = rng.permutation(n)
+    scorer = mahalanobis_scorer(clean[perm[:split]])
+    cs = scorer(clean[perm[split:]])
 
     plt.figure(figsize=(11, 5))
     for c_name in present:

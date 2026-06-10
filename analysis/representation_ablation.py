@@ -11,6 +11,7 @@ from sklearn.metrics import roc_auc_score, average_precision_score, roc_curve
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vmem_benchmark import benchmark_config as cfg
+from analysis.vmem_utils import slice_phi_stat
 
 def calc_fpr95(y_true, y_score):
     fpr, tpr, thresholds = roc_curve(y_true, y_score)
@@ -77,18 +78,11 @@ def extract_representation(feats, rep_name):
     if rep_name == "full_membrane":
         return feats['phi']
     elif rep_name == "membrane_mean":
-        # phi is [mean, var, kurtosis] for each layer, concatenated.
-        # It's (B, 3*C). We need every 1st out of 3 blocks.
-        # Actually in monitor.py it's cat([mu_gap, var_gap, kurt_gap], dim=-1) per layer.
-        # We can just reshape or slice.
-        c = feats['phi'].shape[1] // 3
-        return feats['phi'][:, :c]
+        return slice_phi_stat(feats['phi'], 'mu')
     elif rep_name == "membrane_var":
-        c = feats['phi'].shape[1] // 3
-        return feats['phi'][:, c:2*c]
+        return slice_phi_stat(feats['phi'], 'var')
     elif rep_name == "membrane_kurtosis":
-        c = feats['phi'].shape[1] // 3
-        return feats['phi'][:, 2*c:]
+        return slice_phi_stat(feats['phi'], 'kurtosis')
     elif rep_name == "ANN":
         # Let's use last_ann_gap
         return feats['ann'].get('last_ann_gap', feats['ann'].get('asab_gap'))
@@ -125,18 +119,24 @@ def main():
         if train_feat is None:
             print(f"Skipping {rep} (not found)")
             continue
-            
-        # Fit Mahalanobis on clean
-        clean_scores = get_mahalanobis_scores(train_feat, train_feat)
-        
+
+        # 70/30 split: fit on train portion, score hold-out clean as negatives
+        n = len(train_feat)
+        split = int(n * 0.7)
+        rng = np.random.default_rng(42)
+        perm = rng.permutation(n)
+        train_feat_fit = train_feat[perm[:split]]
+        clean_test_feat = train_feat[perm[split:]]
+        clean_scores = get_mahalanobis_scores(train_feat_fit, clean_test_feat)
+
         for run_name, feats in all_feats.items():
             if run_name == 'clean': continue
-            
+
             test_feat = extract_representation(feats, rep)
             if test_feat is None: continue
-            
+
             try:
-                corr_scores = get_mahalanobis_scores(train_feat, test_feat)
+                corr_scores = get_mahalanobis_scores(train_feat_fit, test_feat)
             except ValueError:
                 # Shape mismatch
                 continue

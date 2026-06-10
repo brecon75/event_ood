@@ -113,7 +113,7 @@ def main():
         for i in range(1, n + 1):
             accepted_idx = sorted_idx[:i]
             coverage = i / n
-            risk = degradation[accepted_idx].mean() if degradation[accepted_idx].mean() > 0 else 0
+            risk = degradation[accepted_idx].mean()
             
             coverages.append(coverage)
             risks.append(risk)

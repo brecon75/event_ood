@@ -168,8 +168,8 @@ def auroc_fpr95(y_true: np.ndarray, y_score: np.ndarray):
         return float("nan"), float("nan")
     auroc = roc_auc_score(y_true, y_score)
     fpr, tpr, _ = roc_curve(y_true, y_score)
-    idx   = np.searchsorted(tpr, 0.95)
-    fpr95 = float(fpr[min(idx, len(fpr) - 1)])
+    idx   = int(np.argmax(tpr >= 0.95))
+    fpr95 = float(fpr[idx])
     return float(auroc), fpr95
 
 def _get_present(all_phi, corruptions=None, severities=None):

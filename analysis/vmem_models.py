@@ -45,7 +45,7 @@ class RealNVP(nn.Module):
         self.layers = nn.ModuleList([CouplingLayer(dim, hidden_dim) for _ in range(n_layers)])
         
     def forward(self, x):
-        log_det_tot = torch.zeros(x.shape[0], device=x.device)
+        log_det_tot = torch.zeros(x.shape[0], device=x.device, dtype=x.dtype)
         z = x
         for i, layer in enumerate(self.layers):
             z, log_det = layer(z, flip=(i % 2 == 1))

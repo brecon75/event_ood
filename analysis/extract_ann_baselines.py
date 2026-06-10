@@ -36,6 +36,14 @@ def get_resnet_feature_extractor(in_channels=2):
     return FeatureAndLogit(model)
 
 
+def atomic_save(obj, path):
+    """Save via a temp file + rename so a crash mid-save never leaves a
+    partial .pt that the exists()-based resume check would skip forever."""
+    tmp = path.with_name(f"_tmp_{path.name}")
+    torch.save(obj, tmp)
+    tmp.replace(path)
+
+
 @torch.no_grad()
 def run_batched(model, x, device, batch_size=64):
     feats, logits = [], []
@@ -132,7 +140,7 @@ def main():
                 out_img,
             )
         if vox_feats:
-            torch.save(
+            atomic_save(
                 {"feat": torch.cat(vox_feats, dim=0), "logit": torch.cat(vox_logits, dim=0)},
                 out_vox,
             )

@@ -180,6 +180,8 @@ def evaluate_representation(rep_name, rep_dir):
     results = []
     
     for f in tqdm(list(rep_dir.glob("*.pt")), desc=f"Evaluating {rep_name} runs"):
+        if f.name.startswith("_tmp_"):
+            continue  # leftover partial write from an interrupted extraction
         run_name = f.stem
         if run_name == "clean": continue
         

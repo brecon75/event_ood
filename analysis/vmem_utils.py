@@ -48,9 +48,14 @@ def split_boundary(n: int, train_ratio: float = TRAIN_RATIO, seq_lens=None) -> i
     cut = int(n * train_ratio)
     if seq_lens:
         edges = np.cumsum(seq_lens)
-        if edges[-1] == n:  # only trust seq_lens that actually match the array
-            pos = int(np.searchsorted(edges, cut))
-            cut = int(edges[min(pos, len(edges) - 1)])
+        # Only trust seq_lens that actually match the array, and only align
+        # to INTERIOR sequence boundaries: the last edge equals n, and a cut
+        # there would leave eval empty (with a single sequence it degenerated
+        # to a 1-frame eval set). With no interior boundary, fall back to the
+        # plain ratio cut within the sequence.
+        if edges[-1] == n and len(edges) > 1:
+            interior = edges[:-1]
+            cut = int(interior[np.argmin(np.abs(interior - cut))])
     if n > 1:
         cut = max(1, min(cut, n - 1))  # never let train or eval be empty
     else:

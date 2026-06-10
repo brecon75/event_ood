@@ -151,6 +151,13 @@ def main():
         if X_test is None:
             print(f"Warning: no '{rep}' representation for {run_name} — skipping.")
             continue
+        if X_test.shape[1] != X_clean.shape[1]:
+            # _extract may have fallen back to a different representation for
+            # this run; feeding wrong-width features into the fitted
+            # detectors would crash (or worse, silently misscore).
+            print(f"Warning: {run_name} features are {X_test.shape[1]}-D but "
+                  f"detectors were fitted on {X_clean.shape[1]}-D — skipping.")
+            continue
 
         for name, model in detectors.items():
             test_scores = SCORERS[name](model, X_test)

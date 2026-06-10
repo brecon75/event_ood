@@ -1,3 +1,4 @@
+import json
 import torch
 import numpy as np
 import pandas as pd
@@ -28,6 +29,8 @@ def main():
     detectors = {}
     if out_dir.exists():
         for f in out_dir.glob("*.joblib"):
+            if f.stem == "flow_pca":
+                continue  # PCA half of the 'flow' detector, not a detector
             detectors[f.stem] = joblib.load(f)
             
     reps = [
@@ -43,6 +46,43 @@ def main():
     # 2. All representations with Mahalanobis
     
     clean_seq_lens = load_phi_seq_lens("clean")
+
+    # Fitted detectors must be scored on the representation they were fitted
+    # on (recorded in split.json by fit_detectors.py) — substituting another
+    # representation would feed them wrong-dimensional features.
+    det_rep = 'membrane_fused'
+    split_path = out_dir / "split.json"
+    if split_path.exists():
+        try:
+            with open(split_path) as fh:
+                det_rep = json.load(fh).get("representation", det_rep)
+        except Exception as e:
+            print(f"  [!] Could not read split.json ({e}); assuming '{det_rep}'.")
+
+    # Pre-compute each detector's clean-baseline scores ONCE. The fitted
+    # detectors were trained on the clean-train portion (fit_detectors.py);
+    # only the held-out eval portion is scored as the severity-0 baseline.
+    # A failing detector is skipped instead of aborting the whole analysis.
+    det_clean_scores = {}
+    if detectors:
+        det_train_feat = extract_representation(all_feats['clean'], det_rep)
+        if det_train_feat is None:
+            print(f"  [!] Clean '{det_rep}' representation missing — "
+                  f"skipping fitted-detector severity analysis.")
+        else:
+            _, det_clean_eval = split_train_eval(det_train_feat,
+                                                 seq_lens=clean_seq_lens)
+            for d_name, d_model in detectors.items():
+                if d_name == 'mahalanobis':
+                    continue  # covered by the per-representation loop below
+                score_fn = SCORERS.get(d_name)
+                if score_fn is None:
+                    print(f"  [!] Unknown detector '{d_name}' — skipping.")
+                    continue
+                try:
+                    det_clean_scores[d_name] = score_fn(d_model, det_clean_eval)
+                except Exception as e:
+                    print(f"  [!] {d_name}: clean scoring failed ({e}) — skipping.")
 
     for c_name in tqdm(cfg.CORRUPTIONS, desc="Severity analysis"):
         # Build lists of scores and severities
@@ -84,44 +124,32 @@ def main():
                     "rho": rho
                 })
                 
-        # --- 2. Membrane Fused with all fitted detectors ---
-        rep = 'membrane_fused'
-        train_feat = extract_representation(all_feats['clean'], rep)
-        if train_feat is None:
-            rep = 'full_membrane'
-            train_feat = extract_representation(all_feats['clean'], rep)
-        if train_feat is None:
-            continue
-        # The fitted detectors were trained on the clean-train portion
-        # (fit_detectors.py); only score the held-out eval portion as the
-        # severity-0 baseline so it is not the detectors' own training data.
-        _, clean_eval = split_train_eval(train_feat, seq_lens=clean_seq_lens)
-        for d_name, d_model in detectors.items():
-            if d_name == 'mahalanobis': continue # Already done
-            score_fn = SCORERS.get(d_name)
-            if score_fn is None:
-                print(f"  [!] Unknown detector '{d_name}' — skipping.")
-                continue
-
-            clean_scores = score_fn(d_model, clean_eval)
+        # --- 2. Fitted-detector representation with all fitted detectors ---
+        for d_name, clean_scores in det_clean_scores.items():
+            d_model = detectors[d_name]
+            score_fn = SCORERS[d_name]
             all_scores = list(clean_scores)
             all_severities = [0] * len(clean_scores)
 
             for sev in cfg.SEVERITIES:
                 run_name = f"{c_name}_L{sev}"
                 if run_name not in all_feats: continue
-                test_feat = extract_representation(all_feats[run_name], rep)
+                test_feat = extract_representation(all_feats[run_name], det_rep)
                 if test_feat is None: continue
 
-                scores = score_fn(d_model, test_feat)
+                try:
+                    scores = score_fn(d_model, test_feat)
+                except Exception as e:
+                    print(f"  [!] {run_name}/{d_name}: scoring failed ({e})")
+                    continue
                 all_scores.extend(scores)
                 all_severities.extend([sev] * len(scores))
-                
+
             if len(set(all_severities)) > 1:
                 rho, _ = spearmanr(all_scores, all_severities)
                 results.append({
                     "model": "hybrid",
-                    "representation": rep,
+                    "representation": det_rep,
                     "detector": d_name,
                     "corruption": c_name,
                     "rho": rho

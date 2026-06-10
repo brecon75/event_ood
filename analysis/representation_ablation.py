@@ -18,7 +18,12 @@ def calc_fpr95(y_true, y_score):
     idx = np.argmax(tpr >= 0.95)
     return fpr[idx]
 
-def get_mahalanobis_scores(train_feat, test_feat):
+def fit_mahalanobis(train_feat):
+    """Fit mean + precision once and return a score(test_feat) closure.
+
+    The covariance fit/inversion is O(d^3); callers that score many runs
+    against the same train split must fit once and reuse the closure.
+    """
     try:
         cov = EmpiricalCovariance().fit(train_feat)
         mu = cov.location_
@@ -27,10 +32,14 @@ def get_mahalanobis_scores(train_feat, test_feat):
         print(f"Warning: Covariance fit failed ({e}). Using simple L2.")
         mu = train_feat.mean(axis=0)
         P = np.eye(len(mu))
-        
-    diff = test_feat - mu
-    scores = np.einsum('ni,ij,nj->n', diff, P, diff)
-    return scores
+
+    def score(test_feat):
+        diff = test_feat - mu
+        return np.einsum('ni,ij,nj->n', diff, P, diff)
+    return score
+
+def get_mahalanobis_scores(train_feat, test_feat):
+    return fit_mahalanobis(train_feat)(test_feat)
 
 def load_all_features():
     phi = {f.stem: torch.load(f, weights_only=True)['phi'].numpy() for f in cfg.PHI_DIR.glob("*.pt")}
@@ -55,12 +64,20 @@ def load_all_features():
                 spike[f.stem]["spike_entropy"] = np.nan_to_num(
                     spike[f.stem]["spike_entropy"], nan=0.0)
         
-    # we don't necessarily have all representations for all runs if a run failed
+    # We don't necessarily have all representations for all runs if a run
+    # failed. Keep every run that has phi: extract_representation() returns
+    # None for missing parts, and callers skip None — dropping the whole run
+    # here would also exclude it from membrane-only analyses that never need
+    # ANN/spike features.
     valid_runs = set(phi.keys())
-    if ann:
-        valid_runs = valid_runs.intersection(ann.keys())
-    if spike:
-        valid_runs = valid_runs.intersection(spike.keys())
+    for name, d in (("ANN", ann), ("spike", spike)):
+        if d:
+            missing = sorted(valid_runs - set(d.keys()))
+            if missing:
+                print(f"Warning: {len(missing)} run(s) have phi but no {name} "
+                      f"features ({', '.join(missing[:5])}"
+                      f"{', ...' if len(missing) > 5 else ''}); "
+                      f"{name}-based representations will skip them.")
     
     fused_dir = cfg.OUTPUT_DIR / "features/fused"
     fused = {}
@@ -136,7 +153,8 @@ def main():
         # leak near-identical neighboring frames between fit and eval.
         train_feat_fit, clean_test_feat = split_train_eval(
             train_feat, seq_lens=clean_seq_lens)
-        clean_scores = get_mahalanobis_scores(train_feat_fit, clean_test_feat)
+        scorer = fit_mahalanobis(train_feat_fit)
+        clean_scores = scorer(clean_test_feat)
 
         for run_name, feats in all_feats.items():
             if run_name == 'clean': continue
@@ -145,7 +163,7 @@ def main():
             if test_feat is None: continue
 
             try:
-                corr_scores = get_mahalanobis_scores(train_feat_fit, test_feat)
+                corr_scores = scorer(test_feat)
             except ValueError:
                 # Shape mismatch
                 continue

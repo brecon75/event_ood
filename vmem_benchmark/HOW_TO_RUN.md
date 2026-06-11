@@ -40,6 +40,8 @@ python extract.py --gen1-root "C:/path/to/gen1" --ckpt "C:/path/to/HybridDetecti
 python extract.py --gen1-root "C:/path/to/gen1" --ckpt "C:/path/to/HybridDetection/gen1_mAP36.ckpt" --hybrid-dir "C:/path/to/HybridDetection" --corruption-dir "C:/path/to/event_corruption" --vram-fraction 0.7
 ```
 
+> Each `outputs/phi/<run>.pt` holds `phi` (2112-D membrane moments), `phi_spatial` (1408-D spatial-dispersion stats, float32 — the signal GAP discards), and per-sequence `seq_lens`. The MDD detector (Stage 8 of the full pipeline) consumes these.
+
 ---
 
 ## 3. Run Downstream Analysis

@@ -46,6 +46,19 @@ The benchmark can be executed end-to-end using the native runner scripts in the 
 ./run_full_benchmark.sh --gpus 0 1 2 3 --max-seq 200
 ```
 
+### Quick validation (smoke test)
+Before a full run, validate the whole pipeline end-to-end on **1 sequence × 2 corruptions × 1 severity** (~minutes). It temporarily caps the config, runs all stages, then restores the config:
+```powershell
+.\run_test_pipeline.ps1 --gpus 0 --workers-per-gpu 1
+```
+
+### Pipeline stages & key outputs
+The runner executes 16 stages: parallel φ extraction → offline/temporal features → fusion → ResNet ANN baselines → OOD detector fit/eval → **MDD evaluation (Stage 8)** → ablations/severity/reliability/cross-corruption/free-rider → analysis plots → paper tables/figures. Results land under `outputs/results/`, including:
+- `ood_metrics.csv` — the 7 fitted OOD detectors per corruption/severity.
+- `mdd_metrics.csv` / `mdd_metrics_aggregated.csv` — the Manifold-Decomposition Detector (radius + RCF + deep-layer + spatial branches), per-frame and per-recording.
+
+> **Note:** Stage 1 extraction now also saves `phi_spatial` (spatial-dispersion stats, float32) alongside `phi`, plus per-sequence `seq_lens`, in each `outputs/phi/<run>.pt`. `phi` is unchanged (2112-D), so existing analyses are unaffected; the spatial features require a fresh extraction.
+
 ---
 
 ## 3. Running Parallel Extraction Manually

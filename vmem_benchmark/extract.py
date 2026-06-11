@@ -366,6 +366,20 @@ def _merge_seq_artifact(tmp_dir, final_path, data_keys, run_name, log=print):
             seq_lens.append(int(next(iter(chunk.values())).shape[0]))
 
     out = {k: torch.cat(v, dim=0) for k, v in parts.items() if v}
+
+    # All saved data keys must stay row-aligned (they share done_seqs/seq_lens).
+    # A mismatch means we merged a historical file missing one key (e.g. a
+    # pre-spatial phi file lacking 'phi_spatial'): refuse rather than silently
+    # corrupt. Re-extract such runs into a fresh output dir.
+    row_counts = {k: int(v.shape[0]) for k, v in out.items()}
+    if len(set(row_counts.values())) > 1:
+        raise RuntimeError(
+            f"{final_path.name}: data keys have mismatched row counts {row_counts}. "
+            f"This usually means resuming on top of a final file that lacks one of "
+            f"{data_keys} (e.g. legacy phi without phi_spatial). Extract this run "
+            f"into a clean output directory instead of resuming."
+        )
+
     out["run"] = run_name
     out["done_seqs"] = sorted(set(done_all))
     if seq_lens is not None:
@@ -515,6 +529,7 @@ def run_benchmark():
             
             # These lists hold GPU tensors temporarily for this sequence to avoid blocking syncs
             seq_phi_gpu = []
+            seq_phi_spatial_gpu = []
             seq_temporal_phi_cpu = []
             seq_temporal_gap_cpu = []
             seq_asab_gap_cpu = []
@@ -586,6 +601,11 @@ def run_benchmark():
                 if phi_batch.numel() > 0:
                     seq_phi_gpu.append(phi_batch)
 
+                # Collect spatial-dispersion phi (the signal GAP discards)
+                phi_spatial_batch = monitor.collect_phi_spatial()
+                if phi_spatial_batch.numel() > 0:
+                    seq_phi_spatial_gpu.append(phi_spatial_batch)
+
                 # Collect temporal phi online
                 tphi_batch = monitor.collect_temporal_phi()
                 if tphi_batch.numel() > 0:
@@ -615,11 +635,20 @@ def run_benchmark():
                         n_trajs_saved += collected
 
             # --- 4. Save this sequence's phi immediately to disk ---
+            # phi and phi_spatial share one tmp file so the merge keeps them
+            # row-aligned and under the same seq_lens / done_seqs metadata.
             if seq_phi_gpu:
                 phi_seq = torch.cat(seq_phi_gpu, dim=0).cpu()
+                seq_payload = {"phi": phi_seq}
+                if seq_phi_spatial_gpu:
+                    # Stored float32 (~+60 GB across 31 runs). float16 was tried
+                    # but high-activity corruptions (event_flood) push spatial_var
+                    # past the float16 max (65504) -> +inf -> NaN scores; float32
+                    # has the headroom, so keep it simple and lossless.
+                    seq_payload["phi_spatial"] = torch.cat(seq_phi_spatial_gpu, dim=0).cpu()
                 seq_pt = phi_tmp_dir / f"seq_{i:05d}.pt"
-                torch.save(phi_seq, seq_pt)
-                del phi_seq
+                torch.save(seq_payload, seq_pt)
+                del phi_seq, seq_payload
                 gc.collect()
 
             # Save sequence temporal phi online
@@ -687,7 +716,7 @@ def run_benchmark():
                     traj_bank[l_idx].append(torch.cat(tensor_list, dim=1))
 
             # --- 5. Aggressive Memory Cleanup ---
-            del hist_torch_cpu, seq_phi_gpu, seq_traj_cpu, seq_temporal_phi_cpu, seq_temporal_gap_cpu, seq_asab_gap_cpu, seq_last_ann_gap_cpu, seq_head_cls_L0_gap_cpu, seq_spike_rate_cpu, seq_spike_entropy_cpu, seq_det_outputs_cpu
+            del hist_torch_cpu, seq_phi_gpu, seq_phi_spatial_gpu, seq_traj_cpu, seq_temporal_phi_cpu, seq_temporal_gap_cpu, seq_asab_gap_cpu, seq_last_ann_gap_cpu, seq_head_cls_L0_gap_cpu, seq_spike_rate_cpu, seq_spike_entropy_cpu, seq_det_outputs_cpu
             gc.collect()
             if cfg.DEVICE == "cuda":
                 torch.cuda.empty_cache()
@@ -695,13 +724,15 @@ def run_benchmark():
         # --- Merge all per-sequence tmp files (plus any historical final
         #     file) into sequence-index-ordered final outputs ---
         wrote_phi = _merge_seq_artifact(
-            phi_tmp_dir, phi_path, ["phi"], run_name, log=overall_pbar.write)
+            phi_tmp_dir, phi_path, ["phi", "phi_spatial"], run_name, log=overall_pbar.write)
 
         if wrote_phi:
             saved = torch.load(phi_path, weights_only=True, map_location="cpu")
+            spatial_note = (f", phi_spatial {tuple(saved['phi_spatial'].shape)}"
+                            if "phi_spatial" in saved else "")
             overall_pbar.write(
                 f"  Saved phi: {saved['phi'].shape[0]} rows from "
-                f"{len(saved['done_seqs'])} sequences -> {phi_path.name}"
+                f"{len(saved['done_seqs'])} sequences{spatial_note} -> {phi_path.name}"
             )
             del saved
         else:

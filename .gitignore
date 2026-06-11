@@ -42,3 +42,10 @@ vmem_benchmark/benchmark_config.py.bak
 run_test_pipeline.ps1
 run_test_pipeline.sh
 log.txt
+
+# Large generated artifact dirs (renamed/backup/stale extraction outputs)
+vmem_benchmark/outputs_backup_*/
+vmem_benchmark/outputs_stale_*/
+# Run logs & scratch arrays
+test_pipeline_run.log
+test_ideas_seq_lens.npy

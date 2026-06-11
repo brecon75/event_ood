@@ -11,23 +11,32 @@ sys.path.insert(0, str(_HERE.parent))
 from analysis.vmem_utils import LAYER_SPECS
 
 class CouplingLayer(nn.Module):
-    def __init__(self, dim, hidden_dim=64):
+    def __init__(self, dim, hidden_dim=64, flip=False):
         super().__init__()
         self.dim = dim
         self.split_dim = dim // 2
+        self.flip = flip
+        # The conditioner (x1) and the transformed half (x2) swap sizes when the
+        # split is flipped. For odd `dim` these differ, so the s/t nets must be
+        # sized for THIS layer's orientation; sizing them for one orientation
+        # only (the previous code) crashed on flip with odd dim. For even dim
+        # both sizes equal dim//2, so this is identical to the old shapes
+        # (existing even-dim checkpoints still load).
+        if flip:
+            cond_dim, trans_dim = dim - self.split_dim, self.split_dim
+        else:
+            cond_dim, trans_dim = self.split_dim, dim - self.split_dim
         self.s_net = nn.Sequential(
-            nn.Linear(self.split_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, dim - self.split_dim),
-            nn.Tanh()
+            nn.Linear(cond_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, trans_dim), nn.Tanh()
         )
         self.t_net = nn.Sequential(
-            nn.Linear(self.split_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, dim - self.split_dim)
+            nn.Linear(cond_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, trans_dim)
         )
 
-    def forward(self, x, flip=False):
+    def forward(self, x, flip=None):
+        flip = self.flip if flip is None else flip
         if flip:
             x1, x2 = x[:, self.split_dim:], x[:, :self.split_dim]
         else:
@@ -42,13 +51,16 @@ class CouplingLayer(nn.Module):
 class RealNVP(nn.Module):
     def __init__(self, dim, hidden_dim=64, n_layers=4):
         super().__init__()
-        self.layers = nn.ModuleList([CouplingLayer(dim, hidden_dim) for _ in range(n_layers)])
-        
+        # Each layer's split orientation is fixed at construction (alternating),
+        # so its s/t nets are sized correctly even for odd dim.
+        self.layers = nn.ModuleList(
+            [CouplingLayer(dim, hidden_dim, flip=(i % 2 == 1)) for i in range(n_layers)])
+
     def forward(self, x):
         log_det_tot = torch.zeros(x.shape[0], device=x.device, dtype=x.dtype)
         z = x
-        for i, layer in enumerate(self.layers):
-            z, log_det = layer(z, flip=(i % 2 == 1))
+        for layer in self.layers:
+            z, log_det = layer(z)
             log_det_tot += log_det
         return z, log_det_tot
 

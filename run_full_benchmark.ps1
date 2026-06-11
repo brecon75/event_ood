@@ -5,6 +5,31 @@ $ErrorActionPreference = "Stop"
 
 $PYTHON = ".\vmem_benchmark\.venv\Scripts\python.exe"
 
+# ── Stage runner ──────────────────────────────────────────────────────────
+# Windows PowerShell 5.1 does NOT turn a native command's non-zero exit code
+# into a terminating error (even with $ErrorActionPreference = "Stop").
+# Without this guard, a crashed stage would be silently skipped and the script
+# would still print "SUCCESSFUL". Invoke-Stage checks $LASTEXITCODE after every
+# stage and aborts immediately with a clear message naming the failed stage.
+function Invoke-Stage {
+    param(
+        [int]$Number,
+        [string]$Description,
+        [string]$Script,
+        [string[]]$ScriptArgs = @()
+    )
+    Write-Host "Stage ${Number}: $Description"
+    & $PYTHON $Script @ScriptArgs
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "=======================================================================" -ForegroundColor Red
+        Write-Host "   PIPELINE FAILED at Stage ${Number} ($Script), exit code $LASTEXITCODE" -ForegroundColor Red
+        Write-Host "   Fix the error above and re-run. Stages already completed are cached;" -ForegroundColor Red
+        Write-Host "   re-running will resume rather than redo finished work." -ForegroundColor Red
+        Write-Host "=======================================================================" -ForegroundColor Red
+        exit $LASTEXITCODE
+    }
+}
+
 # ── CUDA Device Check ─────────────────────────────────────────────────────
 $CUDA_AVAILABLE = $false
 try {
@@ -25,58 +50,25 @@ if ($CUDA_AVAILABLE) {
 }
 Write-Host "======================================================================="
 
-Write-Host "Stage 1: Running parallel feature extraction (31 runs, all sequences)..."
-if ($CUDA_AVAILABLE) { Write-Host "  --> Running run_parallel_extract.py on GPU (CUDA)..." -ForegroundColor Cyan }
-& $PYTHON vmem_benchmark/run_parallel_extract.py @args
+if ($CUDA_AVAILABLE) { Write-Host "  --> Stage 1 (extraction) and GPU stages will use CUDA." -ForegroundColor Cyan }
 
-Write-Host "Stage 2: Extracting offline features (Temporal AE + margin histograms)..."
-if ($CUDA_AVAILABLE) { Write-Host "  --> Running extract_offline_features.py (Temporal AE training) on GPU (CUDA)..." -ForegroundColor Cyan }
-& $PYTHON analysis/extract_offline_features.py
-
-Write-Host "Stage 3: Running feature fusion and Logistic Regression meta-classifier..."
-& $PYTHON analysis/fusion_features.py
-
-Write-Host "Stage 4: Extracting ResNet-18 ANN baselines (event image & voxel grid)..."
-if ($CUDA_AVAILABLE) { Write-Host "  --> Running extract_ann_baselines.py on GPU (CUDA)..." -ForegroundColor Cyan }
-& $PYTHON analysis/extract_ann_baselines.py
-
-Write-Host "Stage 5: Evaluating ResNet-18 ANN baselines..."
-if ($CUDA_AVAILABLE) { Write-Host "  --> Running evaluate_ann_baselines.py on GPU (CUDA)..." -ForegroundColor Cyan }
-& $PYTHON analysis/evaluate_ann_baselines.py
-
-Write-Host "Stage 6: Fitting OOD detectors on clean SNN fused representation..."
-if ($CUDA_AVAILABLE) { Write-Host "  --> Running fit_detectors.py (SimpleAE training) on GPU (CUDA)..." -ForegroundColor Cyan }
-& $PYTHON analysis/fit_detectors.py
-
-Write-Host "Stage 7: Evaluating fitted OOD detectors on all corrupted runs..."
-if ($CUDA_AVAILABLE) { Write-Host "  --> Running evaluate_detectors.py (AE evaluation) on GPU (CUDA)..." -ForegroundColor Cyan }
-& $PYTHON analysis/evaluate_detectors.py
-
-Write-Host "Stage 8: Running representation ablation (Mahalanobis comparison)..."
-& $PYTHON analysis/representation_ablation.py
-
-Write-Host "Stage 9: Running severity monotonicity analysis (Spearman rho)..."
-& $PYTHON analysis/severity.py
-
-Write-Host "Stage 10: Running downstream task reliability prediction..."
-& $PYTHON analysis/reliability.py
-
-Write-Host "Stage 11: Running cross-corruption zero-shot generalization..."
-& $PYTHON analysis/cross_corruption.py
-
-Write-Host "Stage 12: Running Free Rider validity ablation..."
-if ($CUDA_AVAILABLE) { Write-Host "  --> Running free_rider_ablation.py on GPU (CUDA)..." -ForegroundColor Cyan }
-& $PYTHON analysis/free_rider_ablation.py
-
-Write-Host "Stage 13: Running analysis and main plotting script..."
-& $PYTHON analysis/analyse.py
-
-Write-Host "Stage 14: Building final paper LaTeX tables..."
-& $PYTHON reporting/build_paper_tables.py
-
-Write-Host "Stage 15: Building final paper figures..."
-& $PYTHON reporting/build_paper_figures.py
+Invoke-Stage 1  "Running parallel feature extraction (31 runs, all sequences)..."   "vmem_benchmark/run_parallel_extract.py" $args
+Invoke-Stage 2  "Extracting offline features (Temporal AE + margin histograms)..."   "analysis/extract_offline_features.py"
+Invoke-Stage 3  "Running feature fusion and Logistic Regression meta-classifier..."  "analysis/fusion_features.py"
+Invoke-Stage 4  "Extracting ResNet-18 ANN baselines (event image & voxel grid)..."   "analysis/extract_ann_baselines.py"
+Invoke-Stage 5  "Evaluating ResNet-18 ANN baselines..."                              "analysis/evaluate_ann_baselines.py"
+Invoke-Stage 6  "Fitting OOD detectors on clean SNN fused representation..."          "analysis/fit_detectors.py"
+Invoke-Stage 7  "Evaluating fitted OOD detectors on all corrupted runs..."           "analysis/evaluate_detectors.py"
+Invoke-Stage 8  "Evaluating MDD (per-frame + per-sequence, all branches)..."          "analysis/evaluate_mdd.py"
+Invoke-Stage 9  "Running representation ablation (Mahalanobis comparison)..."        "analysis/representation_ablation.py"
+Invoke-Stage 10 "Running severity monotonicity analysis (Spearman rho)..."           "analysis/severity.py"
+Invoke-Stage 11 "Running downstream task reliability prediction..."                  "analysis/reliability.py"
+Invoke-Stage 12 "Running cross-corruption zero-shot generalization..."              "analysis/cross_corruption.py"
+Invoke-Stage 13 "Running Free Rider validity ablation..."                            "analysis/free_rider_ablation.py"
+Invoke-Stage 14 "Running analysis and main plotting script..."                       "analysis/analyse.py"
+Invoke-Stage 15 "Building final paper LaTeX tables..."                               "reporting/build_paper_tables.py"
+Invoke-Stage 16 "Building final paper figures..."                                    "reporting/build_paper_figures.py"
 
 Write-Host "======================================================================="
-Write-Host "   FULL PIPELINE EXECUTION SUCCESSFUL!"
+Write-Host "   FULL PIPELINE EXECUTION SUCCESSFUL!" -ForegroundColor Green
 Write-Host "======================================================================="

@@ -64,22 +64,28 @@ Stage 4:  extract_ann_baselines.py         → ResNet-18 event-image / voxel-gri
 Stage 5:  evaluate_ann_baselines.py        → ANN baseline scoring
 Stage 6:  fit_detectors.py                 → Fit 7 OOD detectors on clean φ
 Stage 7:  evaluate_detectors.py            → Score detectors → detector_metrics.csv
-Stage 8:  representation_ablation.py       → μ vs σ² vs κ ablation
-Stage 9:  severity.py                      → Spearman ρ monotonicity
-Stage 10: reliability.py                   → OOD score vs mAP degradation
-Stage 11: cross_corruption.py              → Zero-shot generalization
-Stage 12: free_rider_ablation.py           → Trained vs Random SNN vs Raw Input
-Stage 13: analyse.py                       → All analysis, heatmaps, PCA, conformal
-Stage 14: reporting/build_paper_tables.py  → LaTeX tables
-Stage 15: reporting/build_paper_figures.py → Publication-ready figures
+Stage 8:  evaluate_mdd.py                  → MDD: per-frame + per-sequence AUROC (all branches)
+Stage 9:  representation_ablation.py       → μ vs σ² vs κ ablation
+Stage 10: severity.py                      → Spearman ρ monotonicity
+Stage 11: reliability.py                   → OOD score vs mAP degradation
+Stage 12: cross_corruption.py              → Zero-shot generalization
+Stage 13: free_rider_ablation.py           → Trained vs Random SNN vs Raw Input
+Stage 14: analyse.py                       → All analysis, heatmaps, PCA, conformal
+Stage 15: reporting/build_paper_tables.py  → LaTeX tables
+Stage 16: reporting/build_paper_figures.py → Publication-ready figures
 ```
+
+**MDD (Stage 8)** is the single unsupervised detector from `Docs/novel.md`: radius +
+direction-conditioned RCF + deep-layer + (when `phi_spatial` exists) spatial branches, fused by a
+calibrated max. `analysis/mdd.py` holds the class; `evaluate_mdd.py` writes `results/mdd_metrics.csv`
+(per-frame) and `results/mdd_metrics_aggregated.csv` (per-sequence).
 
 ### Key Components
 
 **`vmem_benchmark/`** — Core inference and extraction:
 - `benchmark_config.py` — Single source of truth for all paths, corruption list, severities, device, and batch size. **Edit this file to change dataset/model paths or add corruptions.**
-- `monitor.py` — `VmemMonitor` registers `forward_hook` on all `MultiStepParametricLIFNode` layers. Extracts V_mem tensor (shape `T×1×C×H×W`), applies Global Average Pooling, and computes `[μ, σ², κ]` per channel → 2112-D φ vector per frame (3 moments × 704 channels across 4 PLIF layers).
-- `extract.py` — Main inference loop. Runs model on clean + 30 corrupted variants. Saves φ as `.pt` files under `outputs/phi/`. Strictly `BATCH_SIZE=1` — SpikingJelly treats the batch dimension as time; B>1 causes membrane state cross-leakage across samples.
+- `monitor.py` — `VmemMonitor` registers `forward_hook` on all `MultiStepParametricLIFNode` layers. Extracts V_mem tensor (shape `T×1×C×H×W`), applies Global Average Pooling, and computes `[μ, σ², κ]` per channel → 2112-D φ vector per frame (3 moments × 704 channels across 4 PLIF layers). `collect_phi_spatial()` additionally computes the spatial-dispersion stats GAP discards (`spatial_var`, participation-ratio `spatial_pr`) → **1408-D `phi_spatial`** per frame (2 stats × 704 channels), the per-frame signal for spatial corruptions (`spatial_dropout`, `event_flood`). Stored **float32** (~+60 GB across 31 runs; float16 overflows `spatial_var` under high-activity corruptions like `event_flood`).
+- `extract.py` — Main inference loop. Runs model on clean + 30 corrupted variants. Saves φ as `.pt` files under `outputs/phi/`; each file holds `phi`, `phi_spatial` (same rows/`seq_lens`), `done_seqs`, `seq_lens`. Strictly `BATCH_SIZE=1` — SpikingJelly treats the batch dimension as time; B>1 causes membrane state cross-leakage across samples. **`phi_spatial` requires a fresh extraction** — resuming on top of a pre-spatial `phi` file is refused by the merge guard (row-count mismatch).
 - `run_parallel_extract.py` — Distributes 6 corruptions across N workers on M GPUs. Each worker gets its own log file under `outputs/logs/`.
 
 **`analysis/`** — Post-hoc analysis (14 scripts):
@@ -124,14 +130,18 @@ Mahalanobis (Ledoit-Wolf), kNN (k=5), GMM (5 components), OCSVM (RBF), PCA (50 c
 
 ### Corruptions
 
-| Corruption | Key Behavior |
-|---|---|
-| `hot_pixel` | Perfect monotonicity, AUROC → 1.0 at L5 |
-| `event_flood` | Invisible to static φ (AUROC ≈ 0.55); temporal features rescue it |
-| `temporal_jitter` | Temporal autocorrelation features most effective |
-| `polarity_flip` | Weak signal (AUROC 0.60–0.67); model learned polarity-symmetric features |
-| `event_rate_shift` | Phase transition at severity 3 |
-| `spatial_dropout` | **Anti-detectable** — Spearman ρ = −1.0, AUROC drops *below* 0.5 at L5; static φ is useless, temporal features required |
+Behavior below uses the **reference detector (Mahalanobis) on static φ, full 343k data, L5**. Note three corruptions are **below chance** (informative but inverted — corrupted sits closer to the clean mean than held-out clean).
+
+| Corruption | Static-φ AUROC (L5) | Key Behavior |
+|---|---|---|
+| `hot_pixel` | 1.000 | Perfect monotonicity; persistent spurious events saturate the moments |
+| `temporal_jitter` | 0.709 | Moderate; standardized static / static-AE reach ~0.82–0.84 |
+| `event_rate_shift` | 0.675 | Phase transition ~severity 3; a global activity scalar reaches ~0.85 |
+| `polarity_flip` | 0.429 | **Below chance** — model learned polarity-symmetric features |
+| `event_flood` | 0.408 | **Below chance** — flood preserves per-channel moment structure |
+| `spatial_dropout` | 0.286 | **Anti-detectable** (Spearman ρ = −1.0) — fewer events → quieter membrane → looks *more* normal |
+
+> **Temporal note:** earlier docs claimed temporal features "rescue" event_flood/spatial_dropout to ~0.85. **That result was an artifact (leakage + 50-sample noise) and does not reproduce.** Leakage-safe temporal gives only a *modest* ~0.05–0.08 gain (handcrafted temporal ≈ 0.63 on event_flood, ≈ 0.54 on spatial_dropout). See `Docs/performance_brief.md` and `Docs/Findings.md` §5. Performance levers (two-sided scoring, activity scalar, sequence aggregation, meta-fusion) are catalogued in `Docs/performance_brief.md`.
 
 ## Configuration
 

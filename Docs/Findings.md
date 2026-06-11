@@ -3,6 +3,9 @@
 > Results from `vmem_benchmark/outputs/tables/` and `outputs/plots/`.
 > 6 corruptions × 5 severity levels × 7 detectors = 210 data points.
 
+> [!CAUTION]
+> **CORRECTION (2026-06-11): the headline "temporal rescues the hard corruptions to ~0.85" result in Section 5 does NOT reproduce.** It was computed on the 50-sample raw-trajectory path with a train/eval split that pre-dates the `unified train/eval split` fix, and was inflated by leakage + tiny-sample noise. Re-running the exact same method now gives **0.29 / 0.04 / 0.06** (below chance), and the leakage-safe per-frame temporal features give only **~0.54–0.62** — a modest, significant improvement over static, *not* a rescue. Section 5 and the summary tables below have been corrected. Any AUROC in this doc generated **before the split fix** should be treated as provisional until regenerated. See `Docs/performance_brief.md` for the full audit and `temporal_vs_static.py` / `reproduce_findings_temporal.py` for the reproduction.
+
 ---
 
 ## 1. Detector Comparison — The Headline Numbers
@@ -111,42 +114,57 @@ At L5, Mahalanobis AUROC = 0.439 — **the detector is actively labelling corrup
 
 ---
 
-## 5. Temporal Features — The Biggest Surprise in the Results
+## 5. Temporal Features — CORRECTED (the "rescue to 0.85" does not reproduce)
 
-| Corruption | Static phi AUROC (full 343k, best detector) | Handcrafted Temporal (50 samples, L5) | Temporal AE (50 samples, L5) |
-|:-----------|:-------------------------------------------:|:-------------------------------------:|:----------------------------:|
-| hot_pixel | 1.000 | 1.000 | 1.000 |
-| **event_flood** | **0.554** | **0.830** | **0.848** |
-| temporal_jitter | 0.947 (AE) | 0.853 | **0.905** |
-| polarity_flip | 0.666 | 0.830 | 0.850 |
-| event_rate_shift | 0.902 | 0.952 | **0.960** |
-| **spatial_dropout** | **0.439** (anti-detection) | **0.817** | **0.846** |
+> [!CAUTION]
+> The original version of this section claimed temporal features rescue event_flood and spatial_dropout to ~0.83–0.85 and called it *"the most important finding in the entire benchmark."* **That result is an artifact and is retracted.** What follows is the corrected, reproducible picture.
 
-> [!IMPORTANT]
-> **This is the most important finding in the entire benchmark.**
+### 5a. What was claimed vs. what reproduces
 
-Temporal trajectory features, computed on only **50 samples**, completely rescue the two hardest corruptions:
+The original 0.85 numbers came from the **50-sample raw-trajectory path** (`load_traj_as_temporal_phi` on `trajs/`, capped at 50), with a train/eval split that pre-dated the `unified train/eval split` fix. Re-running the **exact same 50-sample method** on freshly extracted data:
 
-- **event_flood: 0.554 → 0.830/0.848 (+0.28 AUROC).** The static phi mean/variance statistics cannot see event flooding. But the V(t) trajectory over 10 SNN timesteps changes in a detectable way — the membrane charges faster, overshoots more often, and shows different autocorrelation. The Temporal AE captures this even with just 50 training trajectories.
+| Corruption | Originally claimed (50-traj) | Reproduction (same 50-traj method, leakage-safe split) | Per-frame temporal (handcrafted, proper split) |
+|:-----------|:----------------------------:|:------------------------------------------------------:|:----------------------------------------------:|
+| `event_flood` | 0.830 / 0.848 | **0.291** | 0.625 |
+| `spatial_dropout` | 0.817 / 0.846 | **0.037** | 0.541 |
+| `temporal_jitter` | 0.853 / 0.905 | **0.061** | 0.602 |
 
-- **spatial_dropout: 0.439 → 0.817/0.846 (from anti-detection to strongly detectable).** The inversion in static phi is completely fixed by trajectory features. Dropout creates irregular temporal patterns — the dV variance, reset frequency, and entropy all shift dramatically when input events are randomly removed mid-sequence.
+**Diagnosis — two compounding causes:**
+1. **Broken sample regime:** 50 samples = 35 train / 15 test, all from the *first 50 frames of one sequence* — tiny, autocorrelated, unrepresentative. A 28-D Mahalanobis fit on 35 points is near-degenerate (AUROC swings to 0.04).
+2. **Train/eval leakage, since fixed:** the original temporal path almost certainly scored clean frames that were in its own fit set (no held-out split), so clean looked perfectly in-distribution by construction → inflated AUROC. The `unified train/eval split` commit added the held-out split, which deflated it to the honest level.
 
-- **temporal_jitter: 0.905 (Temporal AE) vs 0.768 (static concat phi).** Sequence learning beats all static approaches by a wide margin for the corruption that is literally about temporal order.
+### 5b. The honest temporal result (leakage-safe, larger sample)
 
-**The implication:** If the 50-sample trajectory limitation is fixed (see Ideas.md Idea 4), and temporal phi is computed online for all 343k frames, the temporal results would be dramatically stronger and would dominate the static phi results across all corruptions. **The paper's strongest version is a temporal phi paper, not a static phi paper.**
+A 4-detector head-to-head on a freshly extracted 5-sequence subset (5,160 frames; all detectors fit on the same clean-train; 95% bootstrap CIs):
+
+| Corruption | STATIC Maha | STATIC MLP-AE | TEMPORAL handcrafted | TEMPORAL AE |
+|:-----------|:-----------:|:-------------:|:--------------------:|:-----------:|
+| `event_flood` | 0.578 | 0.50–0.56 | **0.625** [.610,.639] | 0.520 |
+| `spatial_dropout` | 0.468 | 0.457 | **0.541** [.526,.556] | 0.399 |
+| `temporal_jitter` | 0.732 | **0.839** | 0.602 | 0.575 |
+
+- **Handcrafted temporal significantly beats static on event_flood and spatial_dropout** (non-overlapping CIs) — but by **~0.05–0.08**, not a rescue to 0.85.
+- The **Temporal AE is the *weakest* detector** — the handcrafted stats do the temporal work, not the learned AE.
+- **Caveat:** this subset is **not representative** — its static event_flood AUROC is 0.578 vs the full-data 0.409 (extraction caps to the *first* N sequences, a biased sample). The relative ranking is internally valid; absolute numbers are not. Only 5 distinct scenes, so between-scene uncertainty exceeds the frame-level CIs.
+
+**The corrected implication:** temporal features give a *modest, reproducible* improvement on the two hardest corruptions — they do **not** dominate static across the board. The paper cannot be framed as "temporal rescues everything." Establishing a genuine temporal advantage would require (a) a representative multi-sequence extraction (not first-N), (b) full-dataset temporal coverage, and (c) likely sequence-level aggregation. See `Docs/performance_brief.md`.
 
 ---
 
-## Summary Table — What Works and What Doesn't
+## Summary Table — What Works and What Doesn't (CORRECTED)
 
-| Corruption | Static phi (best) | Temporal (50 samples) | Verdict |
-|:-----------|:-----------------:|:---------------------:|:--------|
-| hot_pixel | **1.000** | 1.000 | Both work perfectly |
-| event_rate_shift | 0.902 | 0.960 | Both work, temporal better |
-| temporal_jitter | 0.947 | 0.905 | Static AE wins narrowly at L5 |
-| polarity_flip | 0.666 | 0.850 | Temporal much better |
-| **event_flood** | **0.554 (broken)** | **0.848 (rescued)** | Temporal essential |
-| **spatial_dropout** | **0.439 (inverted)** | **0.846 (rescued)** | Temporal essential |
+Reference-detector (Mahalanobis) static-φ AUROC on full 343k data at L5, vs. the honest leakage-safe temporal best. (The old "Temporal (50 samples)" column has been removed — those numbers were artifacts; see §5.)
+
+| Corruption | Static-φ Mahal (full, L5) | Temporal best (honest) | Verdict |
+|:-----------|:-------------------------:|:----------------------:|:--------|
+| hot_pixel | **1.000** | 1.000 | Trivial — both perfect |
+| temporal_jitter | 0.709 | ~0.60 | Static wins (standardized static AE ~0.84) |
+| event_rate_shift | 0.675 | n/a | Static + activity-scalar → 0.85 |
+| polarity_flip | 0.429 (below chance) | ~0.55 (two-sided) | Hard; modest gains only |
+| **event_flood** | **0.408 (below chance)** | **~0.63 (handcrafted temporal)** | Temporal helps modestly, not a rescue |
+| **spatial_dropout** | **0.286 (anti-detectable)** | **~0.54 (handcrafted temporal)** | Temporal lifts above chance, but weak |
+
+> Note: §1–§4 "best detector" static numbers (e.g. event_flood 0.554, event_rate_shift 0.902) mix detectors and some pre-date the split fix; the reference-detector full-data values above are the trustworthy baseline. Regenerate §1–§4 tables before citing them in the paper.
 
 ---
 
@@ -158,6 +176,6 @@ Temporal trajectory features, computed on only **50 samples**, completely rescue
 | Block 1 best for sensor noise, Block 4 best for dynamics | Supports corruption classification (Ideas.md Idea 3); motivates layer selection |
 | event_flood invisible to static phi | Must be explained theoretically (uniform noise = indistinguishable from busy scene) |
 | spatial_dropout ρ = -1.0 (anti-detection) | Must be explained; actually strengthens the theoretical story (silence = low Mahal) |
-| Temporal features rescue all hard corruptions | **Reframe the paper: this is primarily a temporal Vmem paper** |
+| ~~Temporal features rescue all hard corruptions~~ **RETRACTED** | Temporal gives only a modest (~0.05–0.08) reproducible gain; do **not** frame the paper as a temporal rescue (see §5) |
 | Phase transition in event_rate_shift at L3 | Footnote or supplementary; suggests SNN firing regime threshold |
-| Temporal AE beats handcrafted on 50 samples | If run on full data (Idea 4), this becomes the strongest quantitative result |
+| Honest hard-corruption story | event_flood/spatial_dropout/polarity_flip are genuinely hard for membrane statistics; the contribution is the *theory* (why) + neuromorphic-hardware framing, not a magic temporal fix |

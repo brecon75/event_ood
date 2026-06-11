@@ -204,6 +204,63 @@ class VmemMonitor:
         return torch.cat(parts, dim=-1)  # (B, 3 * sum(C_layers))
 
     # ------------------------------------------------------------------
+    # Spatial-dispersion phi (B, 2*sum_C) — survives what GAP discards
+    # ------------------------------------------------------------------
+    def collect_phi_spatial(self) -> torch.Tensor:
+        """Spatial statistics of the membrane activity map that GAP destroys.
+
+        collect_phi() Global-Average-Pools over space, discarding *where* each
+        channel fired and keeping only the average. Spatial corruptions
+        (spatial_dropout silences regions; event_flood inflates uniformly)
+        leave their primary signature in that spatial layout, so they are
+        nearly invisible to GAP'd phi. From the per-pixel temporal-mean map
+        mu_pix (B,C,D) and temporal-variance (energy) map var_pix (B,C,D) we
+        keep two cheap per-channel summaries, computed from tensors collect_phi
+        already materialises (near-zero extra cost, same forward pass):
+
+          spatial_var : Var over space of mu_pix — how NON-UNIFORM mean
+                        activity is across the sensor. Rises when regions go
+                        silent (dropout), falls under uniform flooding. A
+                        two-sided signal that GAP averages to zero.
+          spatial_pr  : participation ratio of the energy map var_pix over
+                        space, (Σ)^2 / (D · Σ²) in (0,1]; 1 = energy spread
+                        evenly across pixels, →0 = concentrated in a few.
+                        Captures spatial sparsity / concentration.
+
+        Returns
+        -------
+        (B, 2 * sum_layers(C_l)) — per layer [spatial_var(C) | spatial_pr(C)],
+        concatenated across layers. With BATCH_SIZE=1 this is (1, 1408).
+        """
+        parts = []
+        for idx in sorted(self._v.keys()):
+            v_list = self._v[idx]
+            if not v_list:
+                continue
+            V = torch.cat(v_list, dim=1)          # (T, B, C, H, W)
+            T, B, C, H, W = V.shape
+            D = H * W
+            V = V.view(T, B, C, D)
+
+            mu  = V.mean(0)                         # (B, C, D)
+            var = V.var(0, unbiased=False).clamp(min=1e-8)  # (B, C, D)
+
+            spatial_var = mu.var(-1, unbiased=False)        # (B, C)
+            s1 = var.sum(-1)                                # (B, C)
+            # Floor only guards a true 0/0; it must stay well below D*(var floor)^2
+            # (= D*1e-16) or it breaks the ratio's cancellation for low-energy
+            # channels, collapsing a uniform map's PR from 1.0 toward 0.
+            s2 = (var ** 2).sum(-1).clamp(min=1e-20)        # (B, C)
+            spatial_pr = (s1 ** 2) / (D * s2)               # (B, C) in (0, 1]
+
+            parts.append(torch.cat([spatial_var, spatial_pr], dim=-1))  # (B, 2C)
+
+        if not parts:
+            return torch.empty((0,))
+
+        return torch.cat(parts, dim=-1)  # (B, 2 * sum(C_layers))
+
+    # ------------------------------------------------------------------
     # Spatial GAP trajectory extraction (B, T, sum(C_layers))
     # ------------------------------------------------------------------
     def collect_temporal_gap(self) -> torch.Tensor:

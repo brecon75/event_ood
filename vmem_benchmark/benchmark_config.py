@@ -14,16 +14,32 @@ DEFAULT RUN CONFIGURATION DEFINITION:
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# !! EDIT THESE THREE PATHS !!
+# Paths are resolved relative to the repository root by default, so the whole
+# project folder is portable: unzip/clone it anywhere and it just works.
+# To point at data outside the repo, set the VMEM_* environment variables
+# (VMEM_GEN1_ROOT, VMEM_CKPT_PATH, VMEM_HYBRID_DIR, VMEM_OUTPUT_DIR) or edit
+# the fallbacks below.
 # ---------------------------------------------------------------------------
-GEN1_ROOT  = Path("d:/Perdue/gen1")           # root of the Gen1 dataset
-CKPT_PATH  = Path("d:/Perdue/HybridDetection/gen1_mAP36.ckpt")
-HYBRID_DIR = Path("d:/Perdue/HybridDetection") # repo root (for sys.path)
+import os
+
+# Repo root = parent of the vmem_benchmark/ directory that holds this file.
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _path(env_var: str, *default_relative: str) -> Path:
+    """Env override if set, else a path relative to the repo root."""
+    val = os.environ.get(env_var)
+    return Path(val) if val else REPO_ROOT.joinpath(*default_relative)
+
+
+GEN1_ROOT  = _path("VMEM_GEN1_ROOT", "gen1")                          # root of the Gen1 dataset
+CKPT_PATH  = _path("VMEM_CKPT_PATH", "HybridDetection", "gen1_mAP36.ckpt")
+HYBRID_DIR = _path("VMEM_HYBRID_DIR", "HybridDetection")             # repo root (for sys.path)
 
 # ---------------------------------------------------------------------------
 # Output directory (auto-created)
 # ---------------------------------------------------------------------------
-OUTPUT_DIR = Path("d:/Perdue/vmem_benchmark/outputs")
+OUTPUT_DIR = _path("VMEM_OUTPUT_DIR", "vmem_benchmark", "outputs")
 PHI_DIR    = OUTPUT_DIR / "phi"
 TRAJ_DIR   = OUTPUT_DIR / "trajs"
 PLOT_DIR   = OUTPUT_DIR / "plots"

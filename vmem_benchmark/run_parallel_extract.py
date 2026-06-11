@@ -10,6 +10,35 @@ _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 import benchmark_config as cfg
 
+
+def plan_extraction(gpus, workers_per_gpu, corruptions, vram_fraction=None):
+    """Pure scheduling policy, separated from main() so it is unit-testable
+    without spawning subprocesses.
+
+    Returns (workers, chunks, vram_frac):
+      workers    list of {"gpu_id", "device"} (gpus x workers_per_gpu, or
+                 workers_per_gpu CPU workers when gpus is empty)
+      chunks     corruptions round-robin'd across workers (len == len(workers))
+      vram_frac  per-process VRAM fraction (None on CPU unless overridden)
+    """
+    if gpus:
+        workers = [{"gpu_id": g, "device": "cuda"}
+                   for g in gpus for _ in range(workers_per_gpu)]
+    else:
+        workers = [{"gpu_id": None, "device": "cpu"}
+                   for _ in range(workers_per_gpu)]
+
+    num_workers = len(workers)
+    chunks = [[] for _ in range(num_workers)]
+    for idx, corr in enumerate(corruptions):
+        chunks[idx % num_workers].append(corr)
+
+    vram_frac = vram_fraction
+    if vram_frac is None and gpus:
+        vram_frac = max(0.1, min(1.0, 0.95 / workers_per_gpu))
+    return workers, chunks, vram_frac
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Parallel extraction runner for Vmem robustness benchmark on multiple GPUs/processes.",
@@ -34,37 +63,14 @@ def main():
         else:
             gpus = [] # Will run on CPU
             
-    # 2. Determine workers
-    workers = []
-    if not gpus:
-        # CPU only
-        num_cpu_workers = args.workers_per_gpu
-        for i in range(num_cpu_workers):
-            workers.append({"gpu_id": None, "device": "cpu"})
-    else:
-        for gpu_id in gpus:
-            for _ in range(args.workers_per_gpu):
-                workers.append({"gpu_id": gpu_id, "device": "cuda"})
-                
+    # 2-4. Workers, corruption partition, VRAM fraction (pure policy helper)
+    workers, chunks, vram_frac = plan_extraction(
+        gpus, args.workers_per_gpu, cfg.CORRUPTIONS, args.vram_fraction)
     num_workers = len(workers)
     if num_workers == 0:
         print("Error: No workers defined.")
         return
 
-    # 3. Determine VRAM fraction per process
-    vram_frac = args.vram_fraction
-    if vram_frac is None and gpus:
-        # Default to sharing the GPU VRAM safely among workers on that GPU
-        vram_frac = max(0.1, min(1.0, 0.95 / args.workers_per_gpu))
-
-    # 4. Partition corruptions
-    corruptions = cfg.CORRUPTIONS
-    # Split corruptions list into num_workers chunks
-    # We want to distribute them as evenly as possible
-    chunks = [[] for _ in range(num_workers)]
-    for idx, corr in enumerate(corruptions):
-        chunks[idx % num_workers].append(corr)
-        
     print("=" * 60)
     print("  VMEM BENCHMARK: PARALLEL EXTRACTION LAUNCHER")
     print("=" * 60)

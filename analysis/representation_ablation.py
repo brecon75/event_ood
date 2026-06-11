@@ -14,9 +14,14 @@ from vmem_benchmark import benchmark_config as cfg
 from analysis.vmem_utils import slice_phi_stat, split_train_eval, load_phi_seq_lens
 
 def calc_fpr95(y_true, y_score):
+    # Guard single-class input the way vmem_utils.auroc_fpr95 does: roc_curve
+    # raises ("Only one class present") otherwise, and callers that wrap this
+    # in a bare `except: continue` would silently drop the metric.
+    if len(np.unique(y_true)) < 2:
+        return float("nan")
     fpr, tpr, thresholds = roc_curve(y_true, y_score)
-    idx = np.argmax(tpr >= 0.95)
-    return fpr[idx]
+    idx = int(np.argmax(tpr >= 0.95))
+    return float(fpr[idx])
 
 def fit_mahalanobis(train_feat):
     """Fit mean + precision once and return a score(test_feat) closure.

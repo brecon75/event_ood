@@ -85,6 +85,61 @@ def load_phi_seq_lens(run_name: str = "clean", artifact_dir=None):
         return None
 
 
+def load_phi_spatial(run_name: str = "clean"):
+    """Spatial-dispersion features (`phi_spatial`) saved alongside phi, or None.
+
+    Present only for runs extracted after collect_phi_spatial() was added;
+    legacy / pre-spatial phi files return None so callers can degrade
+    gracefully to the GAP'd-phi-only MDD branches.
+    """
+    f = cfg.PHI_DIR / f"{run_name}.pt"
+    if not f.exists():
+        return None
+    try:
+        d = torch.load(f, map_location="cpu", weights_only=True)
+        ps = d.get("phi_spatial", None)
+        return ps.float().numpy() if ps is not None else None
+    except Exception:
+        return None
+
+
+def seq_lens_after_cut(seq_lens, cut):
+    """Per-sequence frame counts for the rows [cut:] of a run.
+
+    Used to aggregate held-out clean scores (rows after the train/eval cut)
+    by recording. A cut that lands inside a sequence keeps that sequence's
+    tail as the first (partial) block. Returns None when seq_lens is absent.
+    """
+    if not seq_lens:
+        return None
+    out = []
+    start = 0
+    for L in seq_lens:
+        end = start + L
+        if end <= cut:
+            start = end
+            continue
+        out.append(end - max(start, cut))
+        start = end
+    return out or None
+
+
+def aggregate_by_seq(scores, seq_lens):
+    """Mean of per-frame `scores` within each sequence (per-recording pooling).
+
+    Returns a 1-D array with one entry per sequence, or None when seq_lens is
+    missing or does not sum to len(scores) (so callers fall back to per-frame).
+    """
+    scores = np.asarray(scores)
+    if not seq_lens or int(np.sum(seq_lens)) != len(scores):
+        return None
+    out, start = [], 0
+    for L in seq_lens:
+        out.append(float(scores[start:start + L].mean()))
+        start += L
+    return np.asarray(out)
+
+
 class LazyPhiDict:
     """Lazy loader for per-run phi arrays with a small LRU cache.
 
@@ -140,6 +195,23 @@ class LazyPhiDict:
         if key not in self._seq_lens and key in self:
             self[key]  # trigger load
         return self._seq_lens.get(key, None)
+
+    def get_phi_spatial(self, key):
+        """Spatial-dispersion features for a run, or None (legacy / fast mode).
+
+        Loaded on demand from the same .pt file as phi. Not cached in the LRU
+        (the MDD reads it once per run); in --fast mode the phi rows are a
+        subsample so the full-length phi_spatial no longer aligns and is
+        dropped.
+        """
+        if key not in self._available or self.fast_mode:
+            return None
+        try:
+            d = torch.load(self._available[key], map_location="cpu", weights_only=True)
+            ps = d.get("phi_spatial", None)
+            return ps.float().numpy() if ps is not None else None
+        except Exception:
+            return None
 
     def keys(self):
         return self._available.keys()

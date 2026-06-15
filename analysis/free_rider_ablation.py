@@ -36,7 +36,7 @@ from analysis.analyse_plots import plot_free_rider_ablation
 # this small while iterating; raise it (or pass --max-seq N) once the full
 # Stage-1 extraction exists so the trained cache covers enough sequences.
 # ---------------------------------------------------------------------------
-MAX_SEQ = 5
+MAX_SEQ = 50
 
 
 def resolve_max_seq():

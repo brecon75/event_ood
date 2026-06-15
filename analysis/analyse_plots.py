@@ -338,26 +338,39 @@ def plot_corruption_confusion_matrix(y_true, y_pred, target_names):
 def plot_free_rider_ablation(results):
     cfg.PLOT_DIR.mkdir(parents=True, exist_ok=True)
     conditions = list(results.keys())
-    
+
+    # Corruptions are discovered from the results dict so the plot scales to
+    # however many corruptions were scored (originally just hot_pixel/event_flood).
+    corruptions = []
+    for cond in conditions:
+        for c in results[cond]:
+            if c not in corruptions:
+                corruptions.append(c)
+    if not corruptions:
+        print("  [plot] No corruptions in results — skipping free_rider plot.")
+        return
+
     x = np.arange(len(conditions))
-    width = 0.35
-    
-    fig, ax = plt.subplots(figsize=(8, 5))
-    
-    vals_hot = [results[cond]['hot_pixel'] for cond in conditions]
-    vals_flood = [results[cond]['event_flood'] for cond in conditions]
-    
-    ax.bar(x - width/2, vals_hot, width, label='hot_pixel_L5', color='#C44E52')
-    ax.bar(x + width/2, vals_flood, width, label='event_flood_L5', color='#4C72B0')
-    
+    n = len(corruptions)
+    width = min(0.8 / n, 0.35)
+    # Center the grouped bars around each condition tick.
+    offsets = (np.arange(n) - (n - 1) / 2) * width
+
+    fig, ax = plt.subplots(figsize=(max(8, 1.6 * len(conditions) * n / 2), 5))
+    cmap = plt.get_cmap("tab10")
+    for j, corr in enumerate(corruptions):
+        vals = [results[cond].get(corr, np.nan) for cond in conditions]
+        ax.bar(x + offsets[j], vals, width, label=corr, color=cmap(j % 10))
+
     ax.set_ylabel('OOD Detection AUROC')
     ax.set_title('Free Rider Ablation: SNN Representations vs Baselines')
     ax.set_xticks(x)
     ax.set_xticklabels(conditions)
-    ax.legend(loc='lower right')
+    ax.legend(loc='lower right', fontsize=8, ncol=max(1, n // 3))
     ax.set_ylim(0, 1.05)
+    ax.axhline(0.5, color='grey', ls='--', lw=0.8, alpha=0.6)
     ax.grid(axis='y', alpha=0.3)
-    
+
     plt.tight_layout()
     plt.savefig(cfg.PLOT_DIR / "free_rider_ablation.pdf")
     plt.close()

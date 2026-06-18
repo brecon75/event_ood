@@ -69,26 +69,30 @@ runs) so the lazy loader's bound holds.
 `fit_mahalanobis` closure now scores on the GPU; `get_mahalanobis_scores` rides
 the same path, so all three stages move off the single-core einsum.
 
-## Remaining bottlenecks & recommendations
+## Resolved (follow-up round)
 
-1. **`fusion_features.py` has its OWN eager `load_all_features`** (loads φ +
-   margin-hist + temporal latents for *all* runs) — the one remaining ~95 GB+
-   host-RAM OOM site. **Recommendation:** give it the same `LazyFeatures`
-   treatment (it writes per-run fused features, so it can stream run-by-run).
+1. **`fusion_features.py` eager all-runs load — FIXED.** Refactored to load
+   `clean` once (for the fusion-weight fit) then stream one run at a time via
+   `_load_run`, freeing each after its fused file is written. Peak RAM ≈ clean +
+   1 run instead of all 31. Added a `Fusing runs` progress bar.
 
-2. **IO amplification.** φ is re-read from disk by every analysis stage, and
-   `representation_ablation` re-reads each run **9×** (once per representation)
-   because the loop is representation-outer. The lazy loader trades RAM for this
-   IO. **Recommendations, in order of payoff:** (a) restructure
-   `representation_ablation` to run-outer (fit all 9 rep scorers on `clean`
-   first, then one pass over runs) → 9× fewer reads, still OOM-safe; (b) store φ
-   as memory-mappable arrays; (c) run the φ-only stages (7/9/10/11) in a single
-   process sharing one warm loader.
+2. **`representation_ablation` 9× φ re-read — FIXED.** Restructured to run-outer:
+   fit all 9 representation scorers on `clean` first, then a single pass over the
+   runs scoring every representation per run. Each run's φ is now read **once**
+   (was 9×), still within the lazy loader's RAM bound. Results unchanged.
 
-3. **OCSVM fitting is disabled** (`fit_detectors.py`) but a stale `ocsvm.joblib`
-   is still scored by stage 7. Either re-enable a capped fit (now cheap to score
-   on GPU) or drop the stale file so the benchmark column is honest.
+3. **Stale `ocsvm.joblib` — FIXED.** Re-enabled a capped RBF OCSVM fit
+   (`OCSVM_FIT_SAMPLES = 20000`; fit is ~O(n²), scoring is GPU-chunked) so the
+   scored model is consistent with the current data and recorded in
+   `fit_manifest.json` (n_support_vectors, n_fit_samples, capped flag).
 
-4. **Host RAM for stage 6** at full scale: X_train (~2 GB) + LedoitWolf
-   covariance/precision (2252² × 8 B ≈ 40 MB each) + sklearn copies. Provision a
-   few GB headroom; it is not GPU-bound.
+## Remaining (lower priority)
+
+- **IO across stages.** φ is still re-read from disk by each φ-consuming stage
+  (7/9/10/11). Within a stage it is now read once; across stages it is re-read.
+  Options if this dominates: store φ as memory-mappable arrays, or run the
+  φ-only stages in one process sharing a warm loader.
+
+- **Host RAM for stage 6** at full scale: X_train (~2 GB) + LedoitWolf
+  covariance/precision (2252² × 8 B ≈ 40 MB each) + sklearn copies. Provision a
+  few GB headroom; it is not GPU-bound.

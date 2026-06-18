@@ -200,35 +200,44 @@ def main():
     results = []
     clean_seq_lens = load_phi_seq_lens("clean")
 
-    for rep in tqdm(reps, desc="Representation Ablation"):
+    # Fit every representation's scorer on clean FIRST (clean is loaded once and
+    # pinned), then make a SINGLE pass over the corruption runs scoring all reps
+    # per run. Loading each run once instead of once-per-representation cuts the
+    # phi disk reads by ~9x without holding more than ~1-2 runs in RAM.
+    print(f"Fitting {len(reps)} representation scorers on clean...")
+    fitted = {}   # rep -> (scorer, clean_scores, train_width)
+    for rep in reps:
         train_feat = extract_representation(all_feats['clean'], rep)
         if train_feat is None:
             print(f"Skipping {rep} (not found)")
             continue
-
         # Sequence-aware 70/30 split: fit on the train portion, score the
         # held-out clean frames as negatives. A random frame-level split would
         # leak near-identical neighboring frames between fit and eval.
         train_feat_fit, clean_test_feat = split_train_eval(
             train_feat, seq_lens=clean_seq_lens)
         scorer = fit_mahalanobis(train_feat_fit)
-        clean_scores = scorer(clean_test_feat)
+        fitted[rep] = (scorer, scorer(clean_test_feat), train_feat_fit.shape[1])
 
-        for run_name, feats in all_feats.items():
-            if run_name == 'clean': continue
+    run_names = sorted(name for name in all_feats if name != 'clean')
+    for run_name in tqdm(run_names, desc="Representation Ablation"):
+        feats = all_feats[run_name]
+        parts = run_name.rsplit('_L', 1)
+        corruption = parts[0]
+        severity = int(parts[1]) if len(parts) > 1 else 0
 
+        for rep, (scorer, clean_scores, train_width) in fitted.items():
             test_feat = extract_representation(feats, rep)
-            if test_feat is None: continue
-
-            try:
-                corr_scores = scorer(test_feat)
-            except ValueError:
-                # Shape mismatch
+            if test_feat is None:
                 continue
-                
+            if test_feat.shape[1] != train_width:
+                continue   # representation width differs for this run — skip
+
+            corr_scores = scorer(test_feat)
+
             y_true = np.concatenate([np.zeros(len(clean_scores)), np.ones(len(corr_scores))])
             y_score = np.concatenate([clean_scores, corr_scores])
-            
+
             if len(np.unique(y_true)) < 2:
                 continue
             try:
@@ -237,12 +246,8 @@ def main():
                 fpr95 = calc_fpr95(y_true, y_score)
             except Exception:
                 continue
-            
-            parts = run_name.rsplit('_L', 1)
-            corruption = parts[0]
-            severity = int(parts[1]) if len(parts) > 1 else 0
-            
-            res_dict = {
+
+            results.append({
                 "model": "hybrid",
                 "representation": rep,
                 "detector": "mahalanobis",
@@ -251,8 +256,7 @@ def main():
                 "auroc": auroc,
                 "aupr": aupr,
                 "fpr95": fpr95
-            }
-            results.append(res_dict)
+            })
             
     df = pd.DataFrame(results)
     out_dir = cfg.OUTPUT_DIR / "results"

@@ -19,7 +19,7 @@ from vmem_benchmark import benchmark_config as cfg
 from analysis.representation_ablation import load_all_features, extract_representation
 from analysis.vmem_utils import (
     MAX_FIT_SAMPLES, TRAIN_RATIO, split_boundary, load_phi_seq_lens, _subsample,
-    _cap_subset, GMM_FIT_SAMPLES,
+    _cap_subset, GMM_FIT_SAMPLES, OCSVM_FIT_SAMPLES,
 )
 from analysis.vmem_models import RealNVP, train_flow_model
 
@@ -188,14 +188,19 @@ def main():
     except Exception as e:
         print(f"GMM failed: {e}")
 
-    # OCSVM disabled for now. RBF OneClassSVM (libsvm) is O(n^2) in memory/time,
-    # so fitting on the full ~240k-frame clean split is impractical on the
-    # current hardware (8 GB GPU / single workstation). Re-enable by restoring
-    # the block below; use _subsample(X_train) for the full-data fit, or cap it.
-    # print("Fitting OCSVM... (might be slow)")
-    # X_svm = _subsample(X_train)
-    # ocsvm = OneClassSVM(gamma='auto').fit(X_svm)
-    # detectors['ocsvm'] = ocsvm
+    print(f"Fitting OCSVM (RBF, CAPPED at {OCSVM_FIT_SAMPLES})...", flush=True)
+    try:
+        # RBF OneClassSVM fit is ~O(n^2); cap it (scoring is GPU-chunked, so the
+        # cap only bounds the one-time fit). Re-enabled so the scored ocsvm model
+        # is consistent with the current data instead of a stale leftover file.
+        t0 = time.time()
+        X_svm = _cap_subset(X_train, OCSVM_FIT_SAMPLES)
+        ocsvm = OneClassSVM(kernel="rbf", gamma="scale", nu=0.05).fit(X_svm)
+        detectors['ocsvm'] = ocsvm
+        _record('ocsvm', len(X_svm), len(X_svm) < n_train, t0,
+                {"n_support_vectors": int(ocsvm.support_vectors_.shape[0])})
+    except Exception as e:
+        print(f"OCSVM failed: {e}")
 
     print("Fitting AutoEncoder (FULL data, batched)...", flush=True)
     t0 = time.time()

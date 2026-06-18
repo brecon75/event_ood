@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 from pathlib import Path
+from tqdm import tqdm
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -9,42 +10,43 @@ from analysis.vmem_scorers import mahalanobis_scorer
 from analysis.vmem_utils import slice_phi_layer, split_train_eval, load_phi_seq_lens
 
 
-def load_all_features():
-    # Load all representations
-    feats = {}
-    for f in cfg.PHI_DIR.glob("*.pt"):
-        run_name = f.stem
-        feats[run_name] = {}
-        
-        # phi
-        d = torch.load(f, weights_only=True, map_location="cpu")
-        feats[run_name]["membrane_stats"] = d["phi"].numpy()
-        
-        # margin hist
-        mh_path = cfg.OUTPUT_DIR / "features/margin_hist" / f"{run_name}.pt"
-        if mh_path.exists():
-            feats[run_name]["membrane_margin_hist"] = torch.load(mh_path, weights_only=True, map_location="cpu")["margin_hist"].numpy()
-            
-        # trajectory latent
-        tl_path = cfg.OUTPUT_DIR / "features/trajectory_latent" / f"{run_name}.pt"
-        if tl_path.exists():
-            feats[run_name]["membrane_temporal_latent"] = torch.load(tl_path, weights_only=True, map_location="cpu")["trajectory_latent"].numpy()
-            
-        # load temporal features
-        tphi_path = cfg.TEMPORAL_PHI_DIR / f"{run_name}.pt"
-        tf = None
-        if tphi_path.exists():
-            try:
-                tf = torch.load(tphi_path, weights_only=True, map_location="cpu")["temporal_phi"].float().numpy()
-            except Exception:
-                pass
-        if tf is None:
-            from analysis.vmem_utils import load_traj_as_temporal_phi
-            tf = load_traj_as_temporal_phi(run_name)
-            
-        if tf is not None:
-            feats[run_name]["membrane_temporal"] = tf
-            
+def _load_run(run_name):
+    """Load one run's representations (phi + margin-hist + trajectory-latent +
+    temporal-phi) on demand. Returns None if the run has no phi.
+
+    Loading ONE run at a time (instead of all ~31 at once) is the whole point:
+    the eager version held every run's phi + margin-hist + temporal features in
+    RAM simultaneously, which OOMs a cluster node at full scale."""
+    phi_path = cfg.PHI_DIR / f"{run_name}.pt"
+    if not phi_path.exists():
+        return None
+    feats = {"membrane_stats": torch.load(phi_path, weights_only=True,
+                                          map_location="cpu")["phi"].numpy()}
+
+    mh_path = cfg.OUTPUT_DIR / "features/margin_hist" / f"{run_name}.pt"
+    if mh_path.exists():
+        feats["membrane_margin_hist"] = torch.load(
+            mh_path, weights_only=True, map_location="cpu")["margin_hist"].numpy()
+
+    tl_path = cfg.OUTPUT_DIR / "features/trajectory_latent" / f"{run_name}.pt"
+    if tl_path.exists():
+        feats["membrane_temporal_latent"] = torch.load(
+            tl_path, weights_only=True, map_location="cpu")["trajectory_latent"].numpy()
+
+    tphi_path = cfg.TEMPORAL_PHI_DIR / f"{run_name}.pt"
+    tf = None
+    if tphi_path.exists():
+        try:
+            tf = torch.load(tphi_path, weights_only=True,
+                            map_location="cpu")["temporal_phi"].float().numpy()
+        except Exception:
+            pass
+    if tf is None:
+        from analysis.vmem_utils import load_traj_as_temporal_phi
+        tf = load_traj_as_temporal_phi(run_name)
+    if tf is not None:
+        feats["membrane_temporal"] = tf
+
     return feats
 
 def align_and_concat(feat_dict, keys, run_name=""):
@@ -71,20 +73,24 @@ def main():
     
     out_dir = cfg.OUTPUT_DIR / "features/fused"
     out_dir.mkdir(parents=True, exist_ok=True)
-    
-    feats = load_all_features()
-    
-    if "clean" not in feats:
+
+    run_names = sorted(f.stem for f in cfg.PHI_DIR.glob("*.pt"))
+    if "clean" not in run_names:
         print("Error: clean features not found.")
         return
-        
+
+    # Load clean ONCE (its features fit all fusion weights below, and clean is
+    # reused when its turn comes in the run loop so it isn't read twice).
+    print("Loading clean features for fusion-weight fitting...")
+    clean_feats = _load_run("clean")
+
     # Task C: Layer Attention Fusion — unsupervised weights from clean data
     # only: each layer is weighted by the inverse of its clean feature
     # variance (stable layers get more weight), normalized to sum to 1.
     # Weights are estimated on the clean TRAIN split so held-out clean frames
     # stay untouched for downstream evaluation.
     print("Computing Layer Fusion weights (Task C)...")
-    clean_phi = feats["clean"]["membrane_stats"]
+    clean_phi = clean_feats["membrane_stats"]
     clean_phi_train, _ = split_train_eval(clean_phi, seq_lens=load_phi_seq_lens("clean"))
 
     alpha = []
@@ -123,10 +129,15 @@ def main():
         w = w / w.sum()
         print(f"Learned Mahalanobis Score Weights: {w}")
     
-    # Process all runs
-    for run_name, run_feats in feats.items():
+    # Process all runs — load each on demand and free it after saving, so peak
+    # RAM stays at ~clean + one run instead of all ~31 runs at once.
+    print(f"Fusing {len(run_names)} runs...")
+    for run_name in tqdm(run_names, desc="Fusing runs"):
+        run_feats = clean_feats if run_name == "clean" else _load_run(run_name)
+        if run_feats is None:
+            continue
         phi = run_feats["membrane_stats"]
-        
+
         # Apply layer fusion to phi (Task C)
         layer_fused_stats = []
         for i in range(4):

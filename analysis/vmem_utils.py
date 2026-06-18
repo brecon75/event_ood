@@ -348,6 +348,11 @@ def _subsample(arr: np.ndarray, n: int = MAX_FIT_SAMPLES) -> np.ndarray:
 # though every other detector now fits on the full set.
 GMM_FIT_SAMPLES = 20000
 
+# RBF OneClassSVM (libsvm) FIT is ~O(n^2) in time/memory, so it keeps an explicit
+# cap too. Scoring is GPU-chunked (see evaluate_detectors.score_ocsvm), so only
+# the one-time fit is bounded here.
+OCSVM_FIT_SAMPLES = 20000
+
 
 def _cap_subset(arr: np.ndarray, n: int = GMM_FIT_SAMPLES, seed: int = 42) -> np.ndarray:
     """Deterministic HARD cap to `n` rows. Unlike `_subsample` (no-op outside

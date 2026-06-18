@@ -49,3 +49,8 @@ vmem_benchmark/outputs_stale_*/
 # Run logs & scratch arrays
 test_pipeline_run.log
 test_ideas_seq_lens.npy
+
+# Local-only test suite — kept on disk for local use, never committed/pushed
+tests/
+pytest.ini
+run_analysis_tests.py

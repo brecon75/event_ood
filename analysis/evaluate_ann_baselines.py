@@ -5,14 +5,27 @@ from pathlib import Path
 from sklearn.metrics import roc_auc_score, average_precision_score, roc_curve
 from sklearn.covariance import LedoitWolf
 from tqdm import tqdm
-from sklearn.neighbors import NearestNeighbors
 from scipy.special import logsumexp
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vmem_benchmark import benchmark_config as cfg
-from analysis.vmem_utils import split_train_eval, load_phi_seq_lens
+from analysis.vmem_utils import split_train_eval, load_phi_seq_lens, chunked_apply, knn_score
 import functools
+
+
+def _device():
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def _np(x):
+    return x.numpy() if hasattr(x, "numpy") else np.asarray(x)
+
+
+def _chunk_feats(fn, feats, device, n_ref):
+    """Run a per-row torch `fn` over feature rows, chunked/OOM-safe on the GPU."""
+    X = np.ascontiguousarray(_np(feats), dtype=np.float32)
+    return chunked_apply(fn, X, device, n_ref=n_ref)
 
 
 # ResNet-18's fc head has exactly 512 input features.
@@ -65,16 +78,21 @@ class DetectorMSP:
     def fit(self, feats, logits): pass
     def score(self, feats, logits):
         # Higher score = more OOD
-        probs = torch.softmax(logits, dim=1)
-        msp = probs.max(dim=1).values
-        return -msp.numpy()
+        device = _device()
+        def fn(c):
+            return -torch.softmax(c, dim=1).max(dim=1).values
+        L = np.ascontiguousarray(_np(logits), dtype=np.float32)
+        return chunked_apply(fn, L, device, n_ref=L.shape[1])
 
 class DetectorEnergy:
     def __init__(self, T=1.0): self.T = T
     def fit(self, feats, logits): pass
     def score(self, feats, logits):
-        energy = self.T * logsumexp(logits.numpy() / self.T, axis=1)
-        return -energy
+        device, T = _device(), self.T
+        def fn(c):
+            return -T * torch.logsumexp(c / T, dim=1)
+        L = np.ascontiguousarray(_np(logits), dtype=np.float32)
+        return chunked_apply(fn, L, device, n_ref=L.shape[1])
 
 class DetectorODIN:
     """ODIN (Liang et al., ICLR 2018). Temperature-scaled max softmax with the
@@ -86,9 +104,11 @@ class DetectorODIN:
     def __init__(self, T=1000.0): self.T = T
     def fit(self, feats, logits): pass
     def score(self, feats, logits):
-        probs = torch.softmax(logits / self.T, dim=1)
-        msp = probs.max(dim=1).values
-        return -msp.numpy()
+        device, T = _device(), self.T
+        def fn(c):
+            return -torch.softmax(c / T, dim=1).max(dim=1).values
+        L = np.ascontiguousarray(_np(logits), dtype=np.float32)
+        return chunked_apply(fn, L, device, n_ref=L.shape[1])
 
 class DetectorMahalanobis:
     """Mahalanobis (Lee et al., NeurIPS 2018), single-class core. The
@@ -101,15 +121,20 @@ class DetectorMahalanobis:
     def __init__(self): self.mu = None; self.P = None
     def fit(self, feats, logits):
         try:
-            cov = LedoitWolf().fit(feats.numpy())
+            cov = LedoitWolf().fit(_np(feats))     # one-time, 512-D: cheap on CPU
             self.mu = cov.location_
             self.P = cov.precision_
         except Exception:
-            self.mu = feats.numpy().mean(0)
+            self.mu = _np(feats).mean(0)
             self.P = np.eye(feats.shape[1])
     def score(self, feats, logits):
-        d = feats.numpy() - self.mu
-        return np.einsum("ni,ij,nj->n", d, self.P, d)
+        device = _device()
+        mu = torch.from_numpy(np.ascontiguousarray(self.mu, np.float32)).to(device)
+        P = torch.from_numpy(np.ascontiguousarray(self.P, np.float32)).to(device)
+        def fn(c):
+            d = c - mu
+            return ((d @ P) * d).sum(dim=1)
+        return _chunk_feats(fn, feats, device, P.shape[0])
 
 class DetectorKNN:
     """Deep nearest-neighbour OOD (Sun et al., ICML 2022). Two faithful details
@@ -118,18 +143,20 @@ class DetectorKNN:
     k-th nearest training neighbour r_k(z) = ||z - z_(k)||_2, NOT the mean of
     the k distances. k=50 follows the paper's CIFAR-10 setting, clamped to the
     available fit set."""
-    def __init__(self, k=50): self.k = k; self.nn = None
+    def __init__(self, k=50): self.k = k; self._ref = None; self._k = k
     @staticmethod
     def _normalize(feats):
-        x = feats.numpy() if hasattr(feats, "numpy") else np.asarray(feats)
+        x = _np(feats)
         return x / (np.linalg.norm(x, axis=1, keepdims=True) + 1e-10)
     def fit(self, feats, logits):
-        z = self._normalize(feats)
-        k = max(1, min(self.k, z.shape[0]))  # clamp k to available samples
-        self.nn = NearestNeighbors(n_neighbors=k, metric='euclidean').fit(z)
+        # Keep the L2-normalised reference; the GPU-streaming knn_score handles
+        # it without resident-whole uploads. k clamped to available samples.
+        self._ref = self._normalize(feats).astype(np.float32)
+        self._k = max(1, min(self.k, self._ref.shape[0]))
     def score(self, feats, logits):
-        dists, _ = self.nn.kneighbors(self._normalize(feats))
-        return dists[:, -1]  # distance to the k-th nearest neighbour
+        # Distance to the k-th nearest neighbour (Sun et al. 2022), GPU-chunked.
+        return knn_score(self._ref, self._k, self._normalize(feats),
+                         _device(), reduce="kth")
 
 class DetectorReAct:
     """ReAct (Sun et al., NeurIPS 2021): rectify (clip) the penultimate
@@ -151,10 +178,15 @@ class DetectorReAct:
     def score(self, feats, logits):
         if self.head is None:
             return _energy(logits)  # fallback: Energy on the stored logits
+        device = _device()
         W, b = self.head
-        h = np.clip(feats.numpy(), a_min=None, a_max=self.c)
-        recomputed = h @ W.T + b
-        return _energy(recomputed)  # Energy; higher = more OOD
+        Wt = torch.from_numpy(np.ascontiguousarray(W, np.float32)).to(device)
+        bt = torch.from_numpy(np.ascontiguousarray(b, np.float32)).to(device)
+        c_clip = float(self.c)
+        def fn(c):
+            rec = torch.clamp(c, max=c_clip) @ Wt.T + bt   # recomputed logits
+            return -torch.logsumexp(rec, dim=1)            # Energy; higher = more OOD
+        return _chunk_feats(fn, feats, device, Wt.shape[0])
 
 class DetectorViM:
     """Faithful ViM (Wang et al. 2022, "ViM: Out-Of-Distribution with
@@ -206,9 +238,14 @@ class DetectorViM:
     def score(self, feats, logits):
         if self.NS is None:
             return np.zeros(feats.shape[0])
-        f = feats.numpy()
-        vlogit = np.linalg.norm((f - self.o) @ self.NS, axis=1) * self.alpha
-        energy = logsumexp(logits.numpy(), axis=1)
+        device = _device()
+        NS = torch.from_numpy(np.ascontiguousarray(self.NS, np.float32)).to(device)
+        o = torch.from_numpy(np.ascontiguousarray(self.o, np.float32)).to(device)
+        a = float(self.alpha)
+        def fn(c):
+            return a * torch.norm((c - o) @ NS, dim=1)
+        vlogit = _chunk_feats(fn, feats, device, NS.shape[1])
+        energy = logsumexp(_np(logits), axis=1)        # cheap, logit-width only
         return vlogit - energy  # higher = more OOD
 
 class DetectorDICE:
@@ -238,9 +275,14 @@ class DetectorDICE:
     def score(self, feats, logits):
         if self.head is None or self.mask is None:
             return _energy(logits)  # fallback: Energy on the stored logits
+        device = _device()
         W, b = self.head
-        recomputed = feats.numpy() @ (self.mask * W).T + b
-        return _energy(recomputed)  # Energy; higher = more OOD
+        MW = torch.from_numpy(np.ascontiguousarray(self.mask * W, np.float32)).to(device)
+        bt = torch.from_numpy(np.ascontiguousarray(b, np.float32)).to(device)
+        def fn(c):
+            rec = c @ MW.T + bt                    # sparsified-head logits
+            return -torch.logsumexp(rec, dim=1)    # Energy; higher = more OOD
+        return _chunk_feats(fn, feats, device, MW.shape[0])
 
 class DetectorGradNorm:
     """GradNorm (Huang, Geng & Li, NeurIPS 2021). OOD score is the L1 norm of
@@ -257,12 +299,14 @@ class DetectorGradNorm:
     def __init__(self, T=1.0): self.T = T
     def fit(self, feats, logits): pass
     def score(self, feats, logits):
-        f = feats.numpy()
-        lg = logits.numpy() / self.T
+        lg = _np(logits) / self.T
         C = lg.shape[1]
         p = np.exp(lg - logsumexp(lg, axis=1, keepdims=True))   # softmax(f/T)
         out_term = np.abs(1.0 - C * p).sum(axis=1)              # sum_j|1 - C p_j|
-        feat_term = np.abs(f).sum(axis=1)                       # ||h||_1
+        device = _device()
+        def fn(c):
+            return torch.abs(c).sum(dim=1)                      # ||h||_1
+        feat_term = _chunk_feats(fn, feats, device, 1)
         gradnorm = (feat_term * out_term) / (C * self.T)
         return -gradnorm
 

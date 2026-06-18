@@ -438,15 +438,21 @@ def chunked_apply(fn, X, device, n_ref: int = 1, init_chunk: int = None,
 
 
 def knn_score(ref, k, X, device, ref_block: int = 16384,
-              init_query: int = None, min_chunk: int = 128):
-    """Mean distance to the k nearest `ref` neighbours, double-chunked.
+              init_query: int = None, min_chunk: int = 128, reduce: str = "mean"):
+    """Distance to the k nearest `ref` neighbours, double-chunked.
+
+    `reduce="mean"` returns the mean of the k nearest distances (the φ-detector
+    convention); `reduce="kth"` returns the distance to the k-th nearest
+    neighbour (the deep-kNN / Sun-et-al. convention used by the ANN baseline).
 
     The reference stays on CPU and is streamed to the device in `ref_block`
     rows, so the full clean reference (which can be ~2 GB) is never resident on
     the GPU at once — an allocation fix, NOT a data cap (the entire reference is
     still used). Query rows are chunked too, halving on CUDA OOM. Single source
-    of truth for the GPU kNN used by both `evaluate_detectors.score_knn` and
-    `vmem_scorers.knn_scorer`."""
+    of truth for the GPU kNN used by `evaluate_detectors.score_knn`,
+    `vmem_scorers.knn_scorer`, and the ANN-baseline `DetectorKNN`."""
+    if reduce not in ("mean", "kth"):
+        raise ValueError(f"reduce must be 'mean' or 'kth', got {reduce!r}")
     ref_cpu = torch.from_numpy(np.ascontiguousarray(ref, dtype=np.float32))
     n_ref = ref_cpu.shape[0]
     k = max(1, min(k, n_ref))
@@ -468,7 +474,9 @@ def knn_score(ref, k, X, device, ref_block: int = 16384,
                 kk = min(k, dm.shape[1])
                 best, _ = torch.topk(dm, kk, largest=False, dim=1)
                 del rb, dm
-            out.append(best.mean(dim=1).to("cpu"))
+            # best holds the k smallest distances; its max is the k-th nearest.
+            reduced = best.max(dim=1).values if reduce == "kth" else best.mean(dim=1)
+            out.append(reduced.to("cpu"))
             del q, best
         except RuntimeError as e:
             if "out of memory" not in str(e).lower():

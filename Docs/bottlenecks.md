@@ -11,6 +11,7 @@ what was fixed, and what remains.*
 | 1 · extract | **GPU** (SNN forward, B=1) | unchanged (inherent) | — |
 | 6 · fit_detectors | CPU sklearn + **95 GB eager load** | lazy load (clean only); fit_ae streams; manifest | host-RAM OOM |
 | 7 · evaluate_detectors | **CPU single-thread** (ocsvm/gmm/maha/pca) + **95 GB eager load** | **all scorers on GPU**, chunked; lazy load | multi-day CPU + RAM OOM |
+| 5 · evaluate_ann_baselines | **CPU** (numpy/sklearn, all 9 detectors) | **all scoring on GPU**, chunked; kNN streams reference | CPU brute kNN/Mahalanobis at 343k frames |
 | 8 · evaluate_mdd | GPU (already chunked) | + progress bar | — |
 | 9 · representation_ablation | **CPU einsum** ×9 reps ×31 runs | **GPU Mahalanobis**; lazy load | CPU + RAM OOM |
 | 10 · severity / 11 · reliability | CPU einsum (`get_mahalanobis_scores`) | **GPU**; lazy load | CPU + RAM OOM |
@@ -85,6 +86,22 @@ the same path, so all three stages move off the single-core einsum.
    (`OCSVM_FIT_SAMPLES = 20000`; fit is ~O(n²), scoring is GPU-chunked) so the
    scored model is consistent with the current data and recorded in
    `fit_manifest.json` (n_support_vectors, n_fit_samples, capped flag).
+
+4. **ANN baselines (Stage 5) scored on CPU — FIXED.** All 9 ResNet-18 OOD
+   detectors (MSP / Energy / ODIN / Mahalanobis / kNN / ReAct / ViM / DICE /
+   GradNorm) now score chunked on the GPU; the kNN routes through the streaming
+   `knn_score` (new `reduce="kth"` mode for the k-th-neighbour convention).
+   Validated against the original numpy formulas to ~1e-6. Their one-time fits
+   (LedoitWolf / eigh / pinv at 512-D) stay on CPU — cheap and one-off, like the
+   main detectors' sklearn fits.
+
+## What stays on CPU (by design)
+
+Detector **fits** are sklearn/numpy: LedoitWolf, PCA-SVD, GMM-EM, OCSVM-libsvm,
+the kNN reference build, cross_corruption's LogisticRegression, and the ANN
+baselines' covariance/eigh/pinv. These are one-time and bounded (caps above, or
+small 512-D), and can't move to the GPU without reimplementing the estimators.
+**All per-frame SCORING across the pipeline is now on the GPU.**
 
 ## Remaining (lower priority)
 

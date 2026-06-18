@@ -93,6 +93,24 @@ def test_knn_score_empty_query():
     assert out.shape == (0,)
 
 
+@pytest.mark.parametrize("ref_block", [8, 50000])
+def test_knn_score_kth_reduction_matches_bruteforce(ref_block):
+    """reduce='kth' (the deep-kNN / ANN-baseline convention) must equal the
+    distance to the k-th nearest neighbour, streamed or not."""
+    rng = np.random.default_rng(7)
+    ref = rng.normal(size=(250, 6)).astype(np.float32)
+    X = rng.normal(size=(30, 6)).astype(np.float32)
+    expected = NearestNeighbors(n_neighbors=10).fit(ref).kneighbors(X)[0][:, -1]
+    got = knn_score(ref, 10, X, "cpu", ref_block=ref_block, reduce="kth")
+    assert np.allclose(got, expected, atol=1e-4)
+
+
+def test_knn_score_rejects_bad_reduce():
+    with pytest.raises(ValueError, match="reduce"):
+        knn_score(np.zeros((5, 3), np.float32), 2, np.zeros((2, 3), np.float32),
+                  "cpu", reduce="median")
+
+
 # ───────────────────────── lazy, memory-bounded feature loader ─────────────────────────
 
 def test_lazy_features_bounded_and_correct():

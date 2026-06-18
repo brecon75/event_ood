@@ -17,7 +17,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vmem_benchmark import benchmark_config as cfg
 from analysis.representation_ablation import load_all_features, extract_representation
 from analysis.vmem_utils import (
-    MAX_FIT_SAMPLES, TRAIN_RATIO, split_boundary, load_phi_seq_lens, _subsample
+    MAX_FIT_SAMPLES, TRAIN_RATIO, split_boundary, load_phi_seq_lens, _subsample,
+    _cap_subset, GMM_FIT_SAMPLES,
 )
 from analysis.vmem_models import RealNVP, train_flow_model
 
@@ -45,14 +46,17 @@ def fit_ae(X, epochs=50, lr=1e-3):
     optimizer = optim.Adam(model.parameters(), lr=lr)
     criterion = nn.MSELoss()
 
-    X_tensor = torch.tensor(X, dtype=torch.float32).to(device)
+    # Keep the full training set on CPU (~2 GB at full data) and move only each
+    # 256-row batch to the GPU. Uploading all of X at once OOMs a small GPU; it
+    # still trains on 100% of the data, just not resident all at once.
+    X_tensor = torch.tensor(X, dtype=torch.float32)
     dataset = torch.utils.data.TensorDataset(X_tensor)
     loader = torch.utils.data.DataLoader(dataset, batch_size=256, shuffle=True)
 
     pbar = tqdm(range(epochs), desc="Training Autoencoder (fit)", leave=False)
     for epoch in pbar:
         for batch in loader:
-            x = batch[0]
+            x = batch[0].to(device)
             optimizer.zero_grad()
             recon = model(x)
             loss = criterion(recon, x)
@@ -117,8 +121,9 @@ def main():
     detectors['pca'] = pca
 
     print("Fitting kNN...")
-    # Subsample the reference set: exact kNN against the full clean split is
-    # computationally intractable (brute-force in ~2000-D).
+    # Reference set = the FULL clean train split (cap removed). _subsample is a
+    # no-op outside --fast; brute-force kNN in ~2000-D against all clean frames
+    # is the infinite-compute setting.
     X_knn = _subsample(X_train, n=MAX_FIT_SAMPLES)
     k_nn = max(1, min(5, X_knn.shape[0]))
     knn = NearestNeighbors(n_neighbors=k_nn).fit(X_knn)
@@ -126,19 +131,25 @@ def main():
 
     print("Fitting GMM...")
     try:
-        n_comp = min(5, X_train.shape[0])  # clamp components to available samples
+        # GMM fits on a capped subset (full-cov EM in 2112-D is impractical on
+        # the full split); every other detector still uses all clean data.
+        X_gmm = _cap_subset(X_train, GMM_FIT_SAMPLES)
+        n_comp = min(5, X_gmm.shape[0])  # clamp components to available samples
         gmm = GaussianMixture(n_components=n_comp, covariance_type='full',
-                              reg_covar=1e-4, random_state=42).fit(X_train)
+                              reg_covar=1e-4, random_state=42,
+                              max_iter=1000).fit(X_gmm)  # ceiling raised for convergence
         detectors['gmm'] = gmm
     except Exception as e:
         print(f"GMM failed: {e}")
 
-    print("Fitting OCSVM... (might be slow)")
-    # sample for SVM if too large
-    X_svm = X_train[np.random.default_rng(42).choice(
-        X_train.shape[0], min(X_train.shape[0], 5000), replace=False)]
-    ocsvm = OneClassSVM(gamma='auto').fit(X_svm)
-    detectors['ocsvm'] = ocsvm
+    # OCSVM disabled for now. RBF OneClassSVM (libsvm) is O(n^2) in memory/time,
+    # so fitting on the full ~240k-frame clean split is impractical on the
+    # current hardware (8 GB GPU / single workstation). Re-enable by restoring
+    # the block below; use _subsample(X_train) for the full-data fit, or cap it.
+    # print("Fitting OCSVM... (might be slow)")
+    # X_svm = _subsample(X_train)
+    # ocsvm = OneClassSVM(gamma='auto').fit(X_svm)
+    # detectors['ocsvm'] = ocsvm
 
     print("Fitting AutoEncoder...")
     ae = fit_ae(X_train)

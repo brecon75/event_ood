@@ -1,6 +1,5 @@
 import sys
 import gc
-import csv
 from pathlib import Path
 import torch
 import numpy as np
@@ -27,7 +26,7 @@ from vmem_benchmark.corruption_wrap import apply_corruption_to_tensor
 from spikingjelly.clock_driven import functional
 
 from analysis.vmem_scorers import mahalanobis_scorer
-from analysis.vmem_utils import auroc_fpr95, split_train_eval, TABLE_DIR
+from analysis.vmem_utils import auroc_fpr95, split_train_eval
 from analysis.analyse_plots import plot_free_rider_ablation
 
 # ---------------------------------------------------------------------------
@@ -36,7 +35,7 @@ from analysis.analyse_plots import plot_free_rider_ablation
 # this small while iterating; raise it (or pass --max-seq N) once the full
 # Stage-1 extraction exists so the trained cache covers enough sequences.
 # ---------------------------------------------------------------------------
-MAX_SEQ = 50
+MAX_SEQ = 50  # control ablation: 50 sequences is enough to show the gap; --max-seq to override
 
 
 def resolve_max_seq():
@@ -46,6 +45,8 @@ def resolve_max_seq():
             m = int(sys.argv[i + 1])
     if "--test" in sys.argv or "--fast" in sys.argv or getattr(cfg, "MAX_SEQUENCES", None) == 1:
         m = 1
+    if m is None:
+        return None  # no cap — process every sequence
     return max(1, m)
 
 
@@ -135,6 +136,8 @@ def _slice_first_seqs(phi, seq_lens, max_seq):
     phi rows are concatenated in sequence-processing order, so the first
     `max_seq` sequences are the first sum(seq_lens[:max_seq]) rows. Returns
     (sliced_phi, n_seqs_used)."""
+    if max_seq is None:  # no cap — keep every sequence
+        return phi, (len(seq_lens) if seq_lens else None)
     if seq_lens:
         k = min(max_seq, len(seq_lens))
         rows = int(sum(seq_lens[:k]))
@@ -253,7 +256,9 @@ def auroc_vs_clean(scorer, clean_scores, X):
 
 def main():
     max_seq = resolve_max_seq()
-    max_sev = max(cfg.SEVERITIES)
+    # Control ablation: max severity only (clearest Trained/Random/Raw gap).
+    # Use list(cfg.SEVERITIES) here to sweep all severities instead.
+    severities = [max(cfg.SEVERITIES)]
 
     print("\n======================================================")
     print(" LEVEL 10 - Free Rider Ablation (Idea 9)")
@@ -266,7 +271,9 @@ def main():
         print("[CUDA Status] CUDA active — used for the Random SNN forward pass.")
     else:
         print("[CUDA Status] WARNING: Running on CPU (CUDA not active/available).")
-    print(f"[Config] split={cfg.SPLIT}  max_seq={max_seq}  max_severity=L{max_sev}")
+    seq_label = "all" if max_seq is None else max_seq
+    print(f"[Config] split={cfg.SPLIT}  max_seq={seq_label}  "
+          f"severities={severities}")
     print("======================================================\n")
 
     input_dir = cfg.GEN1_ROOT / cfg.SPLIT
@@ -281,23 +288,26 @@ def main():
         return
     print(f"Running on {len(seq_dirs)} '{cfg.SPLIT}' sequence(s).")
 
-    # Which corruptions have a trained-phi cache at max severity? We can only
-    # run a corruption end-to-end if its trained run exists (Stage 1 output).
-    corruptions = []
+    # Which (corruption, severity) runs have a trained-phi cache? We can only
+    # run a run end-to-end if its trained run exists (Stage 1 output). All
+    # severities are now included (the L5-only cap is removed).
+    runs = []          # (corruption, severity, run_name)
     missing = []
     for c in cfg.CORRUPTIONS:
-        if (cfg.PHI_DIR / f"{c}_L{max_sev}.pt").exists():
-            corruptions.append(c)
-        else:
-            missing.append(c)
+        for sev in severities:
+            run_name = f"{c}_L{sev}"
+            if (cfg.PHI_DIR / f"{run_name}.pt").exists():
+                runs.append((c, sev, run_name))
+            else:
+                missing.append(run_name)
     if missing:
-        print(f"[!] No trained-phi cache for: {', '.join(f'{c}_L{max_sev}' for c in missing)}")
+        print(f"[!] No trained-phi cache for: {', '.join(missing)}")
         print("    Run the full Stage-1 extraction to include these. Skipping them.\n")
     if not (cfg.PHI_DIR / "clean.pt").exists():
         print("Error: clean trained phi cache missing — run Stage 1 (extract.py) first.")
         return
-    if not corruptions:
-        print("Error: no corruption has a trained-phi cache at max severity. Run Stage 1.")
+    if not runs:
+        print("Error: no (corruption, severity) run has a trained-phi cache. Run Stage 1.")
         return
 
     # ------------------------------------------------------------------
@@ -328,18 +338,17 @@ def main():
     # Per-corruption scoring (memory-bounded: one corruption resident at a time)
     # ------------------------------------------------------------------
     results = {cond: {} for cond in scorers}
-    for c in corruptions:
-        run_name = f"{c}_L{max_sev}"
+    for c, sev, run_name in runs:
         print(f"\n[Corruption] {run_name}")
 
         tr, _ = load_trained_phi(run_name, max_seq)
-        rd = extract_random_run(module, backbone, monitor, run_name, c, max_sev, seq_dirs, device)
-        rw = compute_raw_run(seq_dirs, c, max_sev)
+        rd = extract_random_run(module, backbone, monitor, run_name, c, sev, seq_dirs, device)
+        rw = compute_raw_run(seq_dirs, c, sev)
 
         cond_X = {"Trained SNN": tr, "Random SNN": rd, "Raw Input Stats": rw}
         for cond, X in cond_X.items():
             scorer, clean_scores = scorers[cond]
-            results[cond][c] = auroc_vs_clean(scorer, clean_scores, X)
+            results[cond][run_name] = auroc_vs_clean(scorer, clean_scores, X)
         del tr, rd, rw, cond_X
         gc.collect()
 
@@ -353,30 +362,34 @@ def main():
     # ------------------------------------------------------------------
     # Report
     # ------------------------------------------------------------------
+    run_names = [rn for _, _, rn in runs]
     print("\n=======================================================")
-    print(f" FREE RIDER ABLATION RESULTS (AUROC, L{max_sev})")
+    print(" FREE RIDER ABLATION RESULTS (AUROC, all severities)")
     print("=======================================================")
-    header = f"  {'Condition':<18} | " + " | ".join(f"{c:<16}" for c in corruptions)
+    header = f"  {'Condition':<18} | " + " | ".join(f"{rn:<18}" for rn in run_names)
     print(header)
     print("  " + "-" * (len(header) - 2))
     for cond in ["Trained SNN", "Random SNN", "Raw Input Stats"]:
-        row = " | ".join(f"{results[cond].get(c, float('nan')):<16.4f}" for c in corruptions)
+        row = " | ".join(f"{results[cond].get(rn, float('nan')):<18.4f}" for rn in run_names)
         print(f"  {cond:<18} | {row}")
     print("=======================================================\n")
 
-    plot_free_rider_ablation(results)
+    # Wide grid (3 conditions x up to 30 runs) — persist a tidy CSV too.
+    try:
+        import pandas as pd
+        rows = []
+        for c, sev, rn in runs:
+            for cond in results:
+                rows.append({"condition": cond, "corruption": c, "severity": sev,
+                             "auroc": results[cond].get(rn, float("nan"))})
+        out_dir = cfg.OUTPUT_DIR / "results"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(rows).to_csv(out_dir / "free_rider_ablation.csv", index=False)
+        print(f"  Saved {out_dir / 'free_rider_ablation.csv'}")
+    except Exception as e:
+        print(f"  [!] Could not write free_rider CSV: {e}")
 
-    TABLE_DIR.mkdir(parents=True, exist_ok=True)
-    fieldnames = ["Condition"] + [f"{c}_AUROC_L{max_sev}" for c in corruptions]
-    with open(TABLE_DIR / "free_rider_ablation.csv", "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=fieldnames)
-        w.writeheader()
-        for cond in ["Trained SNN", "Random SNN", "Raw Input Stats"]:
-            row = {"Condition": cond}
-            for c in corruptions:
-                row[f"{c}_AUROC_L{max_sev}"] = round(results[cond].get(c, float("nan")), 4)
-            w.writerow(row)
-    print("  Saved free_rider_ablation.csv")
+    plot_free_rider_ablation(results)
 
 
 if __name__ == "__main__":

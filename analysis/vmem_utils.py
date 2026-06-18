@@ -326,10 +326,154 @@ def _get_present(all_phi, corruptions=None, severities=None):
             if any(f"{c}_L{s}" in all_phi for s in severities)]
 
 def _subsample(arr: np.ndarray, n: int = MAX_FIT_SAMPLES) -> np.ndarray:
-    fast_mode = "--fast" in sys.argv
-    if fast_mode:
-        n = min(n, 500)
-    if len(arr) <= n:
+    """Fit-set subsampler.
+
+    Default (infinite-compute) behaviour: NO cap — detectors fit on the FULL
+    clean set, so the `n` argument is ignored. `--fast` restores a hard 500-row
+    cap for quick smoke tests. (Previously this always capped at
+    MAX_FIT_SAMPLES=3000 to bound fit time; that compute cap has been removed so
+    every fitting path — Mahalanobis, kNN, GMM, OCSVM, flow, AE, MDD reference —
+    sees all available data.)"""
+    if "--fast" in sys.argv:
+        cap = min(n if n is not None else len(arr), 500)
+        if len(arr) <= cap:
+            return arr
+        rng = np.random.default_rng(42)
+        return arr[rng.choice(len(arr), cap, replace=False)]
+    return arr
+
+
+# Full-covariance EM in 2112-D scales ~O(n*k*d^2) per iteration and benefits
+# little from more data (a 5-component model), so GMM keeps an explicit cap even
+# though every other detector now fits on the full set.
+GMM_FIT_SAMPLES = 20000
+
+
+def _cap_subset(arr: np.ndarray, n: int = GMM_FIT_SAMPLES, seed: int = 42) -> np.ndarray:
+    """Deterministic HARD cap to `n` rows. Unlike `_subsample` (no-op outside
+    --fast), this always caps — for fits whose cost scales badly with n."""
+    if "--fast" in sys.argv:
+        n = min(n if n is not None else len(arr), 500)
+    if n is None or len(arr) <= n:
         return arr
-    rng = np.random.default_rng(42)
+    rng = np.random.default_rng(seed)
     return arr[rng.choice(len(arr), n, replace=False)]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# VRAM-aware GPU chunking. Single source of truth for every tileable GPU loop,
+# so chunk sizes auto-scale from a laptop card up to a cluster GPU and never need
+# hardcoded magic numbers. `query_chunk_rows` sizes the FIRST chunk from FREE
+# VRAM (a fraction, to leave room for op temporaries / fragmentation);
+# `chunked_apply` then halves on any CUDA OOM the estimate failed to foresee.
+# This only protects *tileable* ops (a batch dim to split). Single large
+# allocations (full-cov GMM, big SVDs) are bounded by the *_FIT_SAMPLES caps
+# instead — chunking cannot help those.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def query_chunk_rows(n_ref: int, device, frac: float = 0.25,
+                     bytes_per_cell: int = 4) -> int:
+    """Rows per chunk so a (chunk x n_ref) float32 buffer uses ~`frac` of FREE
+    GPU memory. CPU has no VRAM limit → a large fixed chunk. Call this AFTER the
+    reference tensor is already on the device, so its memory is excluded."""
+    if str(device) != "cuda" or not torch.cuda.is_available():
+        return 50000
+    try:
+        free, _ = torch.cuda.mem_get_info()
+        rows = int(free * frac / (max(1, n_ref) * bytes_per_cell))
+        return int(np.clip(rows, 256, 131072))
+    except Exception:
+        return 8192
+
+
+def chunked_apply(fn, X, device, n_ref: int = 1, init_chunk: int = None,
+                  min_chunk: int = 128):
+    """Apply `fn` to row-chunks of `X`, concatenating results along dim 0.
+
+    `fn` receives a chunk already moved to `device` and returns a tensor (1-D
+    scores or a 2-D matrix). The chunk size starts from `query_chunk_rows`
+    (or `init_chunk`) and halves on CUDA OOM until the work fits, so callers
+    never hardcode a chunk size or risk an OOM crash. Returns a numpy array when
+    `X` is a numpy array, else a CPU tensor."""
+    is_np = isinstance(X, np.ndarray)
+    Xt = torch.from_numpy(X) if is_np else X
+    N = Xt.shape[0]
+    chunk = init_chunk or query_chunk_rows(n_ref, device)
+    out, i = [], 0
+    while i < N:
+        end = min(i + chunk, N)
+        sub = Xt[i:end].to(device)
+        try:
+            r = fn(sub)
+        except RuntimeError as e:
+            if "out of memory" not in str(e).lower():
+                raise
+            del sub
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            if chunk <= min_chunk:
+                raise
+            chunk = max(min_chunk, chunk // 2)
+            continue
+        out.append(r.detach().to("cpu"))
+        del sub
+        i = end
+    if out:
+        res = torch.cat(out, dim=0)
+    else:
+        # N == 0: probe `fn` on a zero-row slice so the result keeps its
+        # trailing dims. A bare empty((0,)) is 1-D and breaks 2-D consumers
+        # (e.g. MDD._rcf does out[:, 1]) when a sequence is fully dropped or an
+        # eval split is empty.
+        try:
+            res = fn(Xt[:0].to(device)).detach().to("cpu")
+        except Exception:
+            res = torch.empty((0,))
+    return res.numpy() if is_np else res
+
+
+def knn_score(ref, k, X, device, ref_block: int = 16384,
+              init_query: int = None, min_chunk: int = 128):
+    """Mean distance to the k nearest `ref` neighbours, double-chunked.
+
+    The reference stays on CPU and is streamed to the device in `ref_block`
+    rows, so the full clean reference (which can be ~2 GB) is never resident on
+    the GPU at once — an allocation fix, NOT a data cap (the entire reference is
+    still used). Query rows are chunked too, halving on CUDA OOM. Single source
+    of truth for the GPU kNN used by both `evaluate_detectors.score_knn` and
+    `vmem_scorers.knn_scorer`."""
+    ref_cpu = torch.from_numpy(np.ascontiguousarray(ref, dtype=np.float32))
+    n_ref = ref_cpu.shape[0]
+    k = max(1, min(k, n_ref))
+    Xt = torch.from_numpy(np.ascontiguousarray(X, dtype=np.float32))
+    N = Xt.shape[0]
+    # First-chunk size assumes one ref_block resident at a time.
+    qchunk = init_query or query_chunk_rows(min(n_ref, ref_block), device)
+    out, i = [], 0
+    while i < N:
+        end = min(i + qchunk, N)
+        try:
+            q = Xt[i:end].to(device)
+            best = None  # running (m, k) smallest distances seen so far
+            for j in range(0, n_ref, ref_block):
+                rb = ref_cpu[j:j + ref_block].to(device)
+                dm = torch.cdist(q, rb)               # (m, b)
+                if best is not None:
+                    dm = torch.cat([best, dm], dim=1)
+                kk = min(k, dm.shape[1])
+                best, _ = torch.topk(dm, kk, largest=False, dim=1)
+                del rb, dm
+            out.append(best.mean(dim=1).to("cpu"))
+            del q, best
+        except RuntimeError as e:
+            if "out of memory" not in str(e).lower():
+                raise
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            if qchunk <= min_chunk:
+                raise
+            qchunk = max(min_chunk, qchunk // 2)
+            continue
+        i = end
+    return (torch.cat(out).numpy() if out
+            else np.empty((0,), dtype=np.float32))

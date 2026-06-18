@@ -59,6 +59,10 @@ The runner executes 16 stages: parallel φ extraction → offline/temporal featu
 
 > **Note:** Stage 1 extraction now also saves `phi_spatial` (spatial-dispersion stats, float32) alongside `phi`, plus per-sequence `seq_lens`, in each `outputs/phi/<run>.pt`. `phi` is unchanged (2112-D), so existing analyses are unaffected; the spatial features require a fresh extraction.
 
+> **Resourcing the full-data run (Stages 6–7).** The fitting/scoring stages train on the **full** clean set (no data caps; only GMM EM and the PCA-SVD keep fixed-size compute caps, which barely affect a 5-Gaussian / 64-direction estimate). This is a host-RAM and CPU fact, not a bug:
+> - `fit_detectors.py` runs LedoitWolf, PCA and the kNN reference build on the full `X_train` in **host RAM / CPU** — `chunked_apply` only tiles GPU loops, so provision enough host RAM (full φ per run ≈ 2.9 GB plus sklearn copies). For the brute-force kNN query a faiss backend speeds it up *without* shrinking the reference.
+> - `evaluate_detectors.py` now scores **every** detector (mahalanobis, gmm, ocsvm, pca, knn, ae, flow) on the **GPU** via VRAM-aware chunking. Previously ocsvm/gmm/mahalanobis/pca ran single-threaded on CPU — the OCSVM RBF `decision_function` alone dominated multi-day runtimes; the GPU path collapses that to GPU-bound time. The full reference is streamed to the GPU in blocks (never resident whole), so a small GPU won't OOM.
+
 ---
 
 ## 3. Running Parallel Extraction Manually

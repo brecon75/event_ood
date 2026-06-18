@@ -11,38 +11,136 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vmem_benchmark import benchmark_config as cfg
 from analysis.representation_ablation import load_all_features, extract_representation, calc_fpr95
-from analysis.vmem_utils import TRAIN_RATIO, split_boundary, load_phi_seq_lens
+from analysis.vmem_utils import (
+    TRAIN_RATIO, split_boundary, load_phi_seq_lens, chunked_apply, knn_score,
+)
 from analysis.fit_detectors import SimpleAE
 from analysis.vmem_models import RealNVP
 
+
+def _device():
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
 def score_mahalanobis(model, X):
-    diff = X - model.location_
-    return np.einsum('ni,ij,nj->n', diff, model.precision_, diff)
+    """Squared Mahalanobis distance, chunked on the GPU.
+
+    Equivalent to einsum('ni,ij,nj->n', diff, P, diff) but routed through the
+    VRAM-aware GPU path so the reference detector doesn't bottleneck on a single
+    CPU core at 343k frames/run."""
+    device = _device()
+    loc = torch.from_numpy(np.ascontiguousarray(model.location_, dtype=np.float32)).to(device)
+    P = torch.from_numpy(np.ascontiguousarray(model.precision_, dtype=np.float32)).to(device)
+
+    def fn(chunk):
+        diff = chunk - loc
+        return ((diff @ P) * diff).sum(dim=1)
+
+    X = np.ascontiguousarray(X, dtype=np.float32)
+    return chunked_apply(fn, X, device, n_ref=P.shape[0])
 
 def score_knn(model, X):
-    dists, _ = model.kneighbors(X)
-    return dists.mean(axis=1)
+    """Mean distance to the k nearest clean neighbours (higher = more OOD).
+
+    Routed through the shared `knn_score` helper, which streams the reference
+    from CPU in blocks (the full ~2 GB reference is never moved to the GPU in
+    one allocation) and chunks the query with OOM-halving. The saved sklearn
+    model is only a container for its reference points (`_fit_X`) and
+    `n_neighbors`. Falls back to the CPU sklearn path if the reference points
+    are not accessible."""
+    ref = getattr(model, "_fit_X", None)
+    if ref is None:
+        dists, _ = model.kneighbors(X)
+        return dists.mean(axis=1)
+    device = _device()
+    return knn_score(ref, model.n_neighbors, X, device)
 
 def score_gmm(model, X):
-    return -model.score_samples(X)
+    """Negative GMM log-likelihood, chunked on the GPU.
+
+    Reproduces sklearn's `-score_samples` for `covariance_type='full'` directly
+    from the fitted `precisions_cholesky_` / `means_` / `weights_`, so the heavy
+    full-covariance log-prob runs on the GPU instead of single-host BLAS."""
+    if model.covariance_type != "full":
+        return -model.score_samples(X)  # uncommon path; keep sklearn
+
+    device = _device()
+    D = model.means_.shape[1]
+    means = torch.from_numpy(np.ascontiguousarray(model.means_, dtype=np.float32)).to(device)
+    prec_chol = torch.from_numpy(
+        np.ascontiguousarray(model.precisions_cholesky_, dtype=np.float32)).to(device)  # (k, D, D)
+    log_weights = torch.from_numpy(
+        np.log(np.ascontiguousarray(model.weights_, dtype=np.float32))).to(device)       # (k,)
+    # log|prec_chol| per component = sum log of its diagonal (upper-triangular L).
+    log_det = torch.diagonal(prec_chol, dim1=-2, dim2=-1).log().sum(dim=1)                # (k,)
+    const = D * np.log(2.0 * np.pi)
+    nc = means.shape[0]
+
+    def fn(chunk):
+        # weighted log-gaussian per component, stacked then logsumexp.
+        comp = []
+        for k in range(nc):
+            y = chunk @ prec_chol[k] - means[k] @ prec_chol[k]   # (m, D)
+            mahal = (y * y).sum(dim=1)                            # (m,)
+            log_gauss = -0.5 * (const + mahal) + log_det[k]
+            comp.append(log_gauss + log_weights[k])
+        stacked = torch.stack(comp, dim=1)                       # (m, k)
+        return -torch.logsumexp(stacked, dim=1)
+
+    X = np.ascontiguousarray(X, dtype=np.float32)
+    return chunked_apply(fn, X, device, n_ref=D * nc)
 
 def score_ocsvm(model, X):
-    return -model.decision_function(X)
+    """Negative OCSVM decision function, chunked on the GPU.
+
+    sklearn's libsvm `decision_function` is single-threaded with no BLAS — the
+    dominant cost in this stage. The RBF decision is exactly
+    `dual_coef · exp(-gamma·‖x−SV‖²) + intercept`, which we evaluate on the GPU.
+    Falls back to sklearn for any non-RBF kernel."""
+    if model.kernel != "rbf":
+        return -model.decision_function(X)
+
+    device = _device()
+    gamma = float(model._gamma)
+    sv = torch.from_numpy(np.ascontiguousarray(model.support_vectors_, dtype=np.float32)).to(device)
+    dual = torch.from_numpy(
+        np.ascontiguousarray(model.dual_coef_[0], dtype=np.float32)).to(device)   # (n_SV,)
+    intercept = float(model.intercept_[0])
+
+    def fn(chunk):
+        d2 = torch.cdist(chunk, sv).pow_(2)          # (m, n_SV)
+        K = torch.exp(-gamma * d2)
+        dec = K @ dual + intercept
+        return -dec
+
+    X = np.ascontiguousarray(X, dtype=np.float32)
+    return chunked_apply(fn, X, device, n_ref=sv.shape[0])
 
 def score_pca(model, X):
-    X_proj = model.transform(X)
-    X_recon = model.inverse_transform(X_proj)
-    return np.linalg.norm(X - X_recon, axis=1)
+    """PCA reconstruction error, chunked on the GPU."""
+    device = _device()
+    mean = torch.from_numpy(np.ascontiguousarray(model.mean_, dtype=np.float32)).to(device)
+    comp = torch.from_numpy(
+        np.ascontiguousarray(model.components_, dtype=np.float32)).to(device)     # (k, D)
+
+    def fn(chunk):
+        xc = chunk - mean
+        recon = (xc @ comp.T) @ comp                 # project then back-project
+        return torch.norm(xc - recon, dim=1)
+
+    X = np.ascontiguousarray(X, dtype=np.float32)
+    return chunked_apply(fn, X, device, n_ref=comp.shape[1])
 
 def score_ae(model, X):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = model.to(device)
     model.eval()
-    with torch.no_grad():
-        X_t = torch.tensor(X, dtype=torch.float32).to(device)
-        recon = model(X_t)
-        scores = torch.norm(X_t - recon, dim=1).cpu().numpy()
-    return scores
+
+    def fn(chunk):
+        with torch.no_grad():
+            return torch.norm(chunk - model(chunk), dim=1)
+
+    X = np.ascontiguousarray(X, dtype=np.float32)
+    return chunked_apply(fn, X, device, n_ref=X.shape[1])
 
 def score_flow(model, X):
     """model is a (pca, flow) pair; higher score = more OOD."""
@@ -50,12 +148,15 @@ def score_flow(model, X):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     flow = flow.to(device)
     flow.eval()
-    X_t = torch.from_numpy(pca.transform(X)).float().to(device)
-    scores = []
-    with torch.no_grad():
-        for chunk in torch.split(X_t, 20000):
-            scores.append(-flow.log_prob(chunk))
-    return torch.cat(scores).cpu().numpy()
+
+    def fn(chunk):
+        with torch.no_grad():
+            return -flow.log_prob(chunk)
+
+    X = np.ascontiguousarray(pca.transform(X), dtype=np.float32)
+    # Peak isn't the 50-D input: each RealNVP coupling net expands to a hidden
+    # width across n_layers (≈ hidden_dim*n_layers*2), so size the chunk to that.
+    return chunked_apply(fn, X, device, n_ref=64 * 4 * 2)
 
 # Explicit dispatch: an unknown detector file is skipped with a warning
 # instead of silently reusing the previous detector's scores.

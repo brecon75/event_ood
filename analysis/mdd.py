@@ -31,7 +31,7 @@ from sklearn.covariance import LedoitWolf
 
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent))
-from analysis.vmem_utils import LAYER_SPECS, _subsample
+from analysis.vmem_utils import LAYER_SPECS, _subsample, _cap_subset, chunked_apply
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -45,6 +45,9 @@ def l4_columns(phi_dim):
 
 
 def _ledoit_wolf(fit_arr, n_fit=5000):
+    # `n_fit` is IGNORED outside --fast: `_subsample` is a no-op there, so the
+    # covariance fits on the FULL set (more samples = more faithful precision).
+    # The param survives only to cap the fit for quick --fast smoke tests.
     f = _subsample(fit_arr, n_fit)
     try:
         cov = LedoitWolf().fit(f)
@@ -53,20 +56,25 @@ def _ledoit_wolf(fit_arr, n_fit=5000):
         return f.mean(0).astype(np.float32), np.eye(f.shape[1], dtype=np.float32)
 
 
-def _maha_d2(x, mu, P, chunk=50000):
-    out = []
+def _maha_d2(x, mu, P):
     mu_t = torch.from_numpy(mu).to(DEVICE)
     P_t = torch.from_numpy(P).to(DEVICE)
-    for c in torch.split(torch.from_numpy(x).float(), chunk):
-        d = c.to(DEVICE) - mu_t
-        out.append(torch.einsum("ni,ij,nj->n", d, P_t, d).cpu())
-    return torch.cat(out).numpy()
+    def fn(c):
+        d = c - mu_t
+        return torch.einsum("ni,ij,nj->n", d, P_t, d)
+    return chunked_apply(fn, np.ascontiguousarray(x, np.float32),
+                         DEVICE, n_ref=mu_t.shape[0])
 
 
 class MDD:
     def __init__(self, k_pca=64, k_nn=64, n_ref=15000, use_spatial=True):
         self.k_pca = k_pca
         self.k_nn = k_nn
+        # n_ref is IGNORED outside --fast: the RCF reference uses the FULL clean
+        # set (see fit(), where `_subsample` is a no-op). It's projected to k_pca
+        # dims (~61 MB) and the _rcf similarity matrix is chunked, so the full
+        # reference is a bounded speed cost, not an OOM risk. Kept only to cap
+        # the reference for --fast smoke tests.
         self.n_ref = n_ref
         self.use_spatial = use_spatial
         self._fitted = False
@@ -83,9 +91,13 @@ class MDD:
         self.sd_f = (phi_fit.std(0) + 1e-9).astype(np.float32)
         std_fit = (phi_fit - self.mu_f) / self.sd_f
 
-        # PCA (denoise) via torch SVD on a subsample
+        # PCA (denoise) via torch SVD on a CAPPED subsample. SVD is a single
+        # non-tileable GPU allocation (~O(n*D) for U plus cuSOLVER workspace),
+        # so it cannot be chunked — and a 64-component basis saturates well
+        # before 20k samples, so more data buys nothing. _cap_subset (not the
+        # now-no-op _subsample) keeps this bounded and OOM-safe at full scale.
         k = max(1, min(self.k_pca, D, len(std_fit) - 1))
-        sub = torch.from_numpy(_subsample(std_fit, 20000)).float().to(DEVICE)
+        sub = torch.from_numpy(_cap_subset(std_fit, 20000)).float().to(DEVICE)
         self.pca_mean = sub.mean(0).cpu().numpy().astype(np.float32)
         _, _, Vh = torch.linalg.svd(sub - sub.mean(0), full_matrices=False)
         self.pca_comps = Vh[:k].cpu().numpy().astype(np.float32)   # (k, D)
@@ -95,7 +107,8 @@ class MDD:
         self.rg_mu = float(rfit.mean())
         self.rg_sd = float(rfit.std() + 1e-9)
 
-        # RCF reference (directions + radii on a clean subsample)
+        # RCF reference (directions + radii on the FULL clean set; _subsample is
+        # a no-op outside --fast, so self.n_ref does not cap the reference here).
         ref = _subsample(phi_fit, self.n_ref)
         Zref = self._project(ref)
         rref = np.linalg.norm(Zref, axis=1) + 1e-9
@@ -123,35 +136,33 @@ class MDD:
         return self
 
     # -------------------------------------------------------------- internals
-    def _project(self, x, chunk=50000):
+    def _project(self, x):
         mean_t = torch.from_numpy(self.pca_mean).to(DEVICE)
         comps_t = torch.from_numpy(self.pca_comps).to(DEVICE)
-        out = []
-        for c in torch.split(torch.from_numpy(np.asarray(x, np.float32)), chunk):
-            cs = (c.to(DEVICE) - torch.from_numpy(self.mu_f).to(DEVICE)) \
-                / torch.from_numpy(self.sd_f).to(DEVICE)
-            out.append(((cs - mean_t) @ comps_t.T).cpu())
-        return torch.cat(out).numpy()
+        mu_f_t = torch.from_numpy(self.mu_f).to(DEVICE)
+        sd_f_t = torch.from_numpy(self.sd_f).to(DEVICE)
+        def fn(c):
+            cs = (c - mu_f_t) / sd_f_t
+            return (cs - mean_t) @ comps_t.T
+        return chunked_apply(fn, np.ascontiguousarray(x, np.float32),
+                             DEVICE, n_ref=comps_t.shape[1])
 
-    def _rcf(self, Z, chunk=4000):
+    def _rcf(self, Z):
         r = np.linalg.norm(Z, axis=1) + 1e-9
-        u = torch.from_numpy((Z / r[:, None]).astype(np.float32)).to(DEVICE)
+        u = (Z / r[:, None]).astype(np.float32)
         ref_dir = torch.from_numpy(self.ref_dir).to(DEVICE)
         ref_r = torch.from_numpy(self.ref_r).to(DEVICE)
         k = max(1, min(self.k_nn, ref_dir.shape[0]))
-        mus, sds = [], []
-        for c in torch.split(u, chunk):
+        def fn(c):
             sim = c @ ref_dir.T
             _, idx = torch.topk(sim, k, dim=1)
             nbr = ref_r[idx]
-            mus.append(nbr.mean(1).cpu())
             # unbiased=False: this is the spread of the k retrieved radii, not a
             # sample-variance estimate, and unbiased std is NaN when k resolves
             # to 1 (tiny reference set). Keeps the score finite at the edge.
-            sds.append((nbr.std(1, unbiased=False) + 1e-6).cpu())
-        mu = torch.cat(mus).numpy()
-        sd = torch.cat(sds).numpy()
-        return np.abs(r - mu) / sd
+            return torch.stack([nbr.mean(1), nbr.std(1, unbiased=False) + 1e-6], dim=1)
+        out = chunked_apply(fn, u, DEVICE, n_ref=ref_dir.shape[0])  # (N, 2)
+        return np.abs(r - out[:, 0]) / out[:, 1]
 
     def _branches_raw(self, phi, phi_spatial=None):
         phi = np.asarray(phi, dtype=np.float32)

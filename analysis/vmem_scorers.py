@@ -3,7 +3,6 @@ import math
 from pathlib import Path
 import numpy as np
 import torch
-from tqdm import tqdm
 from sklearn.covariance import LedoitWolf
 from sklearn.decomposition import PCA
 from sklearn.mixture import GaussianMixture
@@ -12,7 +11,9 @@ from sklearn.svm import OneClassSVM
 # Fix paths for imports
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent))
-from analysis.vmem_utils import _subsample, MAX_FIT_SAMPLES
+from analysis.vmem_utils import (
+    _subsample, _cap_subset, GMM_FIT_SAMPLES, chunked_apply, knn_score,
+)
 from analysis.vmem_models import (
     train_flow_model, train_ae_model, train_temporal_ae_model,
     prepare_temporal_ae_input
@@ -34,43 +35,31 @@ def mahalanobis_scorer(clean: np.ndarray):
     P_t = torch.from_numpy(P).float().to(device)
 
     def score(x):
-        x_t = torch.from_numpy(x).float().to(device)
-        scores = []
-        chunks = torch.split(x_t, 50000)
-        pbar = tqdm(chunks, desc="Mahalanobis", leave=False, disable=len(chunks) <= 1)
-        for chunk in pbar:
+        def fn(chunk):
             d = chunk - mu_t
-            s = torch.einsum("ni,ij,nj->n", d, P_t, d)
-            scores.append(s)
-        return torch.cat(scores).cpu().numpy()
+            return torch.einsum("ni,ij,nj->n", d, P_t, d)
+        return chunked_apply(fn, np.ascontiguousarray(x, dtype=np.float32),
+                             device, n_ref=mu_t.shape[0])
     return score
 
 
 def knn_scorer(clean: np.ndarray, k: int = 5):
     fit = _subsample(clean)
     k   = max(1, min(k, len(fit) - 1))
-    
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    fit_t = torch.from_numpy(fit).float().to(device)
 
+    # Keep the full reference on CPU; `knn_score` streams it to the GPU in
+    # blocks so the whole ~2 GB clean set is never resident at once.
     def score(x):
-        x_t = torch.from_numpy(x).float().to(device)
-        scores = []
-        chunks = torch.split(x_t, 10000)
-        pbar = tqdm(chunks, desc="k-NN Query", leave=False, disable=len(chunks) <= 1)
-        for chunk in pbar:
-            dist_matrix = torch.cdist(chunk, fit_t, p=2)
-            dists, _ = torch.topk(dist_matrix, k, largest=False, dim=1)
-            scores.append(dists.mean(dim=1))
-        return torch.cat(scores).cpu().numpy()
+        return knn_score(fit, k, x, device)
     return score
 
 
 def gmm_scorer(clean: np.ndarray, n_components: int = 5):
-    fit = _subsample(clean)
+    fit = _cap_subset(clean, GMM_FIT_SAMPLES)  # capped: full-cov EM is heavy in 2112-D
     nc  = min(n_components, max(1, len(fit) // 20))
     fast_mode = "--fast" in sys.argv
-    gmm_iters = 5 if fast_mode else 300
+    gmm_iters = 5 if fast_mode else 1000  # ceiling raised for convergence
     try:
         gmm = GaussianMixture(n_components=nc, covariance_type="full",
                               reg_covar=1e-4, random_state=42, max_iter=gmm_iters)
@@ -89,24 +78,19 @@ def gmm_scorer(clean: np.ndarray, n_components: int = 5):
         log_2pi = math.log(2.0 * math.pi)
 
         def score(x):
-            x_t = torch.from_numpy(x).float().to(device)
-            scores = []
-            chunks = torch.split(x_t, 50000)
-            pbar = tqdm(chunks, desc="GMM Query", leave=False, disable=len(chunks) <= 1)
-            for chunk in pbar:
+            def fn(chunk):
                 log_probs = []
                 for c in range(nc):
                     diff = chunk - means_t[c]
                     proj = diff @ precisions_cholesky_t[c]
                     quad = torch.sum(proj ** 2, dim=-1)
-                    
                     lp = torch.log(weights_t[c]) + 0.5 * log_det_precision[c] - 0.5 * D * log_2pi - 0.5 * quad
                     log_probs.append(lp)
-                
-                log_probs_stack = torch.stack(log_probs, dim=1)
-                log_prob_sample = torch.logsumexp(log_probs_stack, dim=1)
-                scores.append(-log_prob_sample)
-            return torch.cat(scores).cpu().numpy()
+                return -torch.logsumexp(torch.stack(log_probs, dim=1), dim=1)
+            # Peak buffer is (chunk x D) per component, stacked across nc
+            # components for the logsumexp — size the first chunk to D*nc.
+            return chunked_apply(fn, np.ascontiguousarray(x, dtype=np.float32),
+                                 device, n_ref=D * nc)
         return score
     except Exception as e:
         print(f"  [!] GMM failed ({e}), falling back to Mahalanobis")
@@ -127,14 +111,10 @@ def pca_mahalanobis_scorer(clean: np.ndarray, n_components: int = 50):
     pca_components_t = torch.from_numpy(pca.components_).float().to(device)
 
     def score(x):
-        x_t = torch.from_numpy(x).float().to(device)
-        scores = []
-        chunks = torch.split(x_t, 50000)
-        pbar = tqdm(chunks, desc="PCA Project", leave=False, disable=len(chunks) <= 1)
-        for chunk in pbar:
-            chunk_proj = (chunk - pca_mean_t) @ pca_components_t.T
-            scores.append(chunk_proj.cpu().numpy())
-        proj_all = np.concatenate(scores, axis=0)
+        def fn(chunk):
+            return (chunk - pca_mean_t) @ pca_components_t.T
+        proj_all = chunked_apply(fn, np.ascontiguousarray(x, dtype=np.float32),
+                                 device, n_ref=pca_components_t.shape[1])
         return base_score_fn(proj_all)
     return score
 
@@ -143,8 +123,22 @@ def ocsvm_scorer(clean):
     fit = _subsample(clean)
     svm = OneClassSVM(kernel="rbf", gamma="scale", nu=0.05)
     svm.fit(fit)
+
+    # sklearn's libsvm decision_function is single-threaded with no BLAS — the
+    # dominant cost at 343k frames/run. The RBF decision is exactly
+    # dual_coef · exp(-gamma·‖x−SV‖²) + intercept, so evaluate it chunked on GPU.
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    gamma = float(svm._gamma)
+    sv_t = torch.from_numpy(np.ascontiguousarray(svm.support_vectors_, dtype=np.float32)).to(device)
+    dual_t = torch.from_numpy(np.ascontiguousarray(svm.dual_coef_[0], dtype=np.float32)).to(device)
+    intercept = float(svm.intercept_[0])
+
     def score(x):
-        return -svm.decision_function(x)
+        def fn(chunk):
+            d2 = torch.cdist(chunk, sv_t).pow_(2)
+            return -(torch.exp(-gamma * d2) @ dual_t + intercept)
+        return chunked_apply(fn, np.ascontiguousarray(x, dtype=np.float32),
+                             device, n_ref=sv_t.shape[0])
     return score
 
 
@@ -159,13 +153,13 @@ def normalizing_flow_scorer(clean, n_components=50):
     flow = train_flow_model(clean_proj, device=device)
     
     def score(x):
-        x_proj = pca.transform(x)
-        x_t = torch.from_numpy(x_proj).float().to(device)
-        scores = []
-        with torch.no_grad():
-            for chunk in torch.split(x_t, 20000):
-                scores.append(-flow.log_prob(chunk))
-        return torch.cat(scores).cpu().numpy()
+        def fn(chunk):
+            with torch.no_grad():
+                return -flow.log_prob(chunk)
+        x_proj = np.ascontiguousarray(pca.transform(x), dtype=np.float32)
+        # Peak isn't the 50-D input: each RealNVP coupling net expands to a
+        # hidden width across n_layers (≈ hidden_dim*n_layers*2). Size to that.
+        return chunked_apply(fn, x_proj, device, n_ref=64 * 4 * 2)
     return score
 
 
@@ -177,14 +171,11 @@ def autoencoder_scorer(clean):
     ae = train_ae_model(fit, device=device)
     
     def score(x):
-        x_t = torch.from_numpy(x).float().to(device)
-        scores = []
-        with torch.no_grad():
-            for chunk in torch.split(x_t, 20000):
-                recon = ae(chunk)
-                err = ((chunk - recon) ** 2).mean(dim=-1)
-                scores.append(err)
-        return torch.cat(scores).cpu().numpy()
+        def fn(chunk):
+            with torch.no_grad():
+                return ((chunk - ae(chunk)) ** 2).mean(dim=-1)
+        return chunked_apply(fn, np.ascontiguousarray(x, dtype=np.float32),
+                             device, n_ref=x.shape[1])
     return score
 
 

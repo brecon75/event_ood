@@ -7,11 +7,9 @@ import numpy as np
 import joblib
 from tqdm import tqdm
 from pathlib import Path
-from sklearn.covariance import LedoitWolf
 from sklearn.neighbors import NearestNeighbors
 from sklearn.mixture import GaussianMixture
 from sklearn.svm import OneClassSVM
-from sklearn.decomposition import PCA
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -21,6 +19,7 @@ from analysis.vmem_utils import (
     MAX_FIT_SAMPLES, TRAIN_RATIO, split_boundary, load_phi_seq_lens, _subsample,
     _cap_subset, GMM_FIT_SAMPLES, OCSVM_FIT_SAMPLES,
 )
+from analysis.gpu_fit import ledoit_wolf_precision, GpuPCA
 from analysis.vmem_models import RealNVP, train_flow_model
 
 class SimpleAE(nn.Module):
@@ -148,7 +147,7 @@ def main():
     print("Fitting Mahalanobis (Ledoit-Wolf, FULL data)...", flush=True)
     try:
         t0 = time.time()
-        cov = LedoitWolf().fit(X_train)
+        cov = ledoit_wolf_precision(X_train, op="Mahalanobis fit (Ledoit-Wolf)")
         detectors['mahalanobis'] = cov
         _record('mahalanobis', n_train, False, t0)
     except Exception as e:
@@ -156,7 +155,7 @@ def main():
 
     print("Fitting PCA (FULL data)...", flush=True)
     t0 = time.time()
-    pca = PCA(n_components=min(X_train.shape[0], X_train.shape[1], 64)).fit(X_train)
+    pca = GpuPCA.fit(X_train, min(X_train.shape[0], X_train.shape[1], 64), op="PCA fit (SVD)")
     detectors['pca'] = pca
     _record('pca', n_train, False, t0, {"n_components": int(pca.n_components_)})
 
@@ -171,7 +170,8 @@ def main():
     detectors['knn'] = knn
     _record('knn', len(X_knn), len(X_knn) < n_train, t0, {"k": int(k_nn)})
 
-    print(f"Fitting GMM (CAPPED at {GMM_FIT_SAMPLES})...", flush=True)
+    print(f"  [CPU] Fitting GMM (sklearn EM, CAPPED at {GMM_FIT_SAMPLES}; "
+          f"EM is iterative+heuristic — not GPU-reimplemented)...", flush=True)
     try:
         # GMM fits on a capped subset (full-cov EM in 2112-D is impractical on
         # the full split); every other detector still uses all clean data.
@@ -188,7 +188,8 @@ def main():
     except Exception as e:
         print(f"GMM failed: {e}")
 
-    print(f"Fitting OCSVM (RBF, CAPPED at {OCSVM_FIT_SAMPLES})...", flush=True)
+    print(f"  [CPU] Fitting OCSVM (sklearn/libsvm SMO, CAPPED at {OCSVM_FIT_SAMPLES}; "
+          f"O(n^2) SMO — not GPU-reimplemented; scoring IS on GPU)...", flush=True)
     try:
         # RBF OneClassSVM fit is ~O(n^2); cap it (scoring is GPU-chunked, so the
         # cap only bounds the one-time fit). Re-enabled so the scored ocsvm model
@@ -211,8 +212,8 @@ def main():
     print("Fitting Normalizing Flow (PCA + RealNVP, FULL data)...", flush=True)
     try:
         t0 = time.time()
-        flow_pca = PCA(n_components=min(50, X_train.shape[0], X_train.shape[1]),
-                       random_state=42).fit(_subsample(X_train))
+        flow_pca = GpuPCA.fit(X_train, min(50, X_train.shape[0], X_train.shape[1]),
+                              op="Flow PCA fit (SVD)")
         flow = train_flow_model(flow_pca.transform(X_train), device=device)
         torch.save(flow.cpu().state_dict(), out_dir / "flow.pt")
         joblib.dump(flow_pca, out_dir / "flow_pca.joblib")

@@ -27,13 +27,13 @@ import sys
 from pathlib import Path
 import numpy as np
 import torch
-from sklearn.covariance import LedoitWolf
 
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent))
-from analysis.vmem_utils import LAYER_SPECS, _subsample, _cap_subset, chunked_apply
+from analysis.vmem_utils import LAYER_SPECS, _subsample, _cap_subset, chunked_apply, device_for
+from analysis.gpu_fit import ledoit_wolf_precision
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+DEVICE = device_for("MDD (manifold-decomposition detector)")
 
 
 def l4_columns(phi_dim):
@@ -50,7 +50,7 @@ def _ledoit_wolf(fit_arr, n_fit=5000):
     # The param survives only to cap the fit for quick --fast smoke tests.
     f = _subsample(fit_arr, n_fit)
     try:
-        cov = LedoitWolf().fit(f)
+        cov = ledoit_wolf_precision(f, op="MDD Ledoit-Wolf fit")
         return cov.location_.astype(np.float32), cov.precision_.astype(np.float32)
     except Exception:
         return f.mean(0).astype(np.float32), np.eye(f.shape[1], dtype=np.float32)

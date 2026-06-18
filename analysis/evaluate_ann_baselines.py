@@ -3,19 +3,23 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from sklearn.metrics import roc_auc_score, average_precision_score, roc_curve
-from sklearn.covariance import LedoitWolf
 from tqdm import tqdm
 from scipy.special import logsumexp
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vmem_benchmark import benchmark_config as cfg
-from analysis.vmem_utils import split_train_eval, load_phi_seq_lens, chunked_apply, knn_score
+from analysis.vmem_utils import (
+    split_train_eval, load_phi_seq_lens, chunked_apply, knn_score, device_for,
+)
+from analysis.gpu_fit import ledoit_wolf_precision
 import functools
 
 
-def _device():
-    return "cuda" if torch.cuda.is_available() else "cpu"
+def _device(op="ANN-baseline scoring", verbose=False):
+    # Silent by default: called inside per-run hot loops. Fit-time device use is
+    # announced separately (the covariance/eigh fits print their device).
+    return device_for(op, verbose=verbose)
 
 
 def _np(x):
@@ -121,7 +125,7 @@ class DetectorMahalanobis:
     def __init__(self): self.mu = None; self.P = None
     def fit(self, feats, logits):
         try:
-            cov = LedoitWolf().fit(_np(feats))     # one-time, 512-D: cheap on CPU
+            cov = ledoit_wolf_precision(_np(feats), op="ANN Mahalanobis fit (Ledoit-Wolf)")
             self.mu = cov.location_
             self.P = cov.precision_
         except Exception:
@@ -213,26 +217,27 @@ class DetectorViM:
         self.alpha = 1.0
 
     def fit(self, feats, logits):
-        f = feats.numpy()
-        lg = logits.numpy()
+        f = _np(feats)
+        lg = _np(logits)
         d = f.shape[1]
 
         head = _resnet_head(d)
         if head is not None:
             W, b = head
-            self.o = -np.linalg.pinv(W) @ b
+            self.o = (-np.linalg.pinv(W) @ b).astype(np.float32)   # small, CPU
         else:
-            self.o = f.mean(axis=0)
+            self.o = f.mean(axis=0).astype(np.float32)
 
-        X = f - self.o
-        # assume_centred second moment about o (not re-centred on X's own mean)
-        cov = (X.T @ X) / X.shape[0]
-        eigvals, eigvecs = np.linalg.eigh(cov)            # ascending eigenvalues
+        # The O(n*d^2) second moment + eigendecomposition run on the GPU.
+        device = device_for("ViM fit (covariance + eigh)")
+        Xt = torch.from_numpy(np.ascontiguousarray(f - self.o, np.float32)).to(device)
+        cov = (Xt.T @ Xt) / Xt.shape[0]                   # about o, not re-centred
+        _, eigvecs = torch.linalg.eigh(cov)               # ascending eigenvalues
         D = min(self.D, max(1, d - 1))                    # keep >=1 residual dim
-        self.NS = eigvecs[:, : d - D]                     # minor (residual) subspace
-
-        vlogit_train = np.linalg.norm(X @ self.NS, axis=1)
-        denom = vlogit_train.mean()
+        NS = eigvecs[:, : d - D]                          # minor (residual) subspace
+        self.NS = NS.cpu().numpy().astype(np.float32)
+        vlogit_train = torch.norm(Xt @ NS, dim=1)
+        denom = float(vlogit_train.mean())
         self.alpha = float(lg.max(axis=1).mean() / denom) if denom > 0 else 1.0
 
     def score(self, feats, logits):
@@ -345,6 +350,7 @@ def evaluate_representation(rep_name, rep_dir):
     fit_feats, eval_feats = split_train_eval(c_feats, seq_lens=seq_lens)
     fit_logits, eval_logits = split_train_eval(c_logits, seq_lens=seq_lens)
 
+    device_for(f"scoring {len(detectors)} ANN baseline detectors ({rep_name})")
     for name, det in detectors.items():
         det.fit(fit_feats, fit_logits)
 

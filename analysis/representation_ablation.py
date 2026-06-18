@@ -7,13 +7,15 @@ from tqdm import tqdm
 from pathlib import Path
 from collections import OrderedDict
 from collections.abc import Mapping
-from sklearn.covariance import EmpiricalCovariance
 from sklearn.metrics import roc_auc_score, average_precision_score, roc_curve
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vmem_benchmark import benchmark_config as cfg
-from analysis.vmem_utils import slice_phi_stat, split_train_eval, load_phi_seq_lens, chunked_apply
+from analysis.vmem_utils import (
+    slice_phi_stat, split_train_eval, load_phi_seq_lens, chunked_apply, device_for,
+)
+from analysis.gpu_fit import empirical_precision
 
 def calc_fpr95(y_true, y_score):
     # Guard single-class input the way vmem_utils.auroc_fpr95 does: roc_curve
@@ -35,7 +37,7 @@ def fit_mahalanobis(train_feat):
     no longer single-core numpy einsum bound.
     """
     try:
-        cov = EmpiricalCovariance().fit(train_feat)
+        cov = empirical_precision(train_feat, op="repr-ablation Mahalanobis fit")
         mu = cov.location_
         P = cov.precision_
     except Exception as e:
@@ -43,7 +45,7 @@ def fit_mahalanobis(train_feat):
         mu = train_feat.mean(axis=0)
         P = np.eye(len(mu))
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = device_for("repr-ablation Mahalanobis scoring", verbose=False)
     mu_t = torch.from_numpy(np.ascontiguousarray(mu, dtype=np.float32)).to(device)
     P_t = torch.from_numpy(np.ascontiguousarray(P, dtype=np.float32)).to(device)
 

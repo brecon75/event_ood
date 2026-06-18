@@ -2,7 +2,6 @@ import torch
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
 
 import sys
@@ -10,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vmem_benchmark import benchmark_config as cfg
 from analysis.representation_ablation import load_all_features, extract_representation
 from analysis.vmem_utils import split_train_eval, load_phi_seq_lens
+from analysis.gpu_fit import logreg_fit
 
 def main():
     print("Running cross-corruption generalization analysis...")
@@ -55,8 +55,7 @@ def main():
     y_train = np.concatenate([np.zeros(len(X_clean_train)), np.ones(len(X_train_corr))])
     
     print("Training binary detector on clean vs hot_pixel...")
-    clf = LogisticRegression(max_iter=1000)
-    clf.fit(X_train, y_train)
+    clf = logreg_fit(X_train, y_train, op="cross-corruption logistic regression")
     
     # Evaluate generalization on other corruptions
     eval_corruptions = [

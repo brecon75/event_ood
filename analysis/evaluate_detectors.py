@@ -12,14 +12,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vmem_benchmark import benchmark_config as cfg
 from analysis.representation_ablation import load_all_features, extract_representation, calc_fpr95
 from analysis.vmem_utils import (
-    TRAIN_RATIO, split_boundary, load_phi_seq_lens, chunked_apply, knn_score,
+    TRAIN_RATIO, split_boundary, load_phi_seq_lens, chunked_apply, knn_score, device_for,
 )
 from analysis.fit_detectors import SimpleAE
 from analysis.vmem_models import RealNVP
 
 
-def _device():
-    return "cuda" if torch.cuda.is_available() else "cpu"
+def _device(op="detector scoring", verbose=False):
+    # Silent by default: called inside the per-run scoring loop. The stage prints
+    # the device once up front (see main()).
+    return device_for(op, verbose=verbose)
 
 def score_mahalanobis(model, X):
     """Squared Mahalanobis distance, chunked on the GPU.
@@ -239,6 +241,10 @@ def main():
 
     results = []
     sev3plus_data = {name: {'corrupt': []} for name in detectors.keys()}
+
+    # Announce the scoring device once (the per-run loop stays quiet).
+    device_for(f"scoring {len(detectors)} detectors x {len(X_clean_eval)} clean "
+               f"+ corrupted frames")
 
     # Precompute clean scores on the held-out split
     clean_scores = {name: SCORERS[name](model, X_clean_eval)

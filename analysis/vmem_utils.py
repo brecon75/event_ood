@@ -376,6 +376,18 @@ def _cap_subset(arr: np.ndarray, n: int = GMM_FIT_SAMPLES, seed: int = 42) -> np
 # instead — chunking cannot help those.
 # ─────────────────────────────────────────────────────────────────────────────
 
+def device_for(op: str, verbose: bool = True) -> str:
+    """Return 'cuda'/'cpu' and announce which device `op` runs on, so a cluster
+    log makes it obvious whether each operation actually hit the GPU."""
+    if torch.cuda.is_available():
+        if verbose:
+            print(f"  [GPU] {op}", flush=True)
+        return "cuda"
+    if verbose:
+        print(f"  [CPU] {op}", flush=True)
+    return "cpu"
+
+
 def query_chunk_rows(n_ref: int, device, frac: float = 0.25,
                      bytes_per_cell: int = 4) -> int:
     """Rows per chunk so a (chunk x n_ref) float32 buffer uses ~`frac` of FREE

@@ -30,7 +30,7 @@ import torch
 
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent))
-from analysis.vmem_utils import LAYER_SPECS, _subsample, _cap_subset, chunked_apply, device_for
+from analysis.vmem_utils import LAYER_SPECS, _subsample, _cap_subset, chunked_apply, device_for, maha_d2
 from analysis.gpu_fit import ledoit_wolf_precision
 
 DEVICE = device_for("MDD (manifold-decomposition detector)")
@@ -57,13 +57,7 @@ def _ledoit_wolf(fit_arr, n_fit=5000):
 
 
 def _maha_d2(x, mu, P):
-    mu_t = torch.from_numpy(mu).to(DEVICE)
-    P_t = torch.from_numpy(P).to(DEVICE)
-    def fn(c):
-        d = c - mu_t
-        return torch.einsum("ni,ij,nj->n", d, P_t, d)
-    return chunked_apply(fn, np.ascontiguousarray(x, np.float32),
-                         DEVICE, n_ref=mu_t.shape[0])
+    return maha_d2(x, mu, P, DEVICE)
 
 
 class MDD:

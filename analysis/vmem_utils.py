@@ -449,6 +449,24 @@ def chunked_apply(fn, X, device, n_ref: int = 1, init_chunk: int = None,
     return res.numpy() if is_np else res
 
 
+def maha_d2(x, mu, P, device):
+    """Squared Mahalanobis distance (x-mu)^T P (x-mu), chunked on `device`.
+
+    Single source of truth for the rebuild-each-call Mahalanobis scoring used by
+    `evaluate_detectors.score_mahalanobis` and `mdd._maha_d2` (the scorer-factory
+    `vmem_scorers.mahalanobis_scorer` intentionally keeps its own cached mu/P
+    closure to avoid re-uploading across many score calls)."""
+    mu_t = torch.from_numpy(np.ascontiguousarray(mu, dtype=np.float32)).to(device)
+    P_t = torch.from_numpy(np.ascontiguousarray(P, dtype=np.float32)).to(device)
+
+    def fn(chunk):
+        d = chunk - mu_t
+        return ((d @ P_t) * d).sum(dim=1)
+
+    return chunked_apply(fn, np.ascontiguousarray(x, dtype=np.float32),
+                         device, n_ref=P_t.shape[0])
+
+
 def knn_score(ref, k, X, device, ref_block: int = 16384,
               init_query: int = None, min_chunk: int = 128, reduce: str = "mean"):
     """Distance to the k nearest `ref` neighbours, double-chunked.

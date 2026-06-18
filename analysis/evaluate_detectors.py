@@ -12,7 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vmem_benchmark import benchmark_config as cfg
 from analysis.representation_ablation import load_all_features, extract_representation, calc_fpr95
 from analysis.vmem_utils import (
-    TRAIN_RATIO, split_boundary, load_phi_seq_lens, chunked_apply, knn_score, device_for,
+    TRAIN_RATIO, split_boundary, load_phi_seq_lens, chunked_apply, knn_score,
+    device_for, maha_d2,
 )
 from analysis.fit_detectors import SimpleAE
 from analysis.vmem_models import RealNVP
@@ -24,21 +25,8 @@ def _device(op="detector scoring", verbose=False):
     return device_for(op, verbose=verbose)
 
 def score_mahalanobis(model, X):
-    """Squared Mahalanobis distance, chunked on the GPU.
-
-    Equivalent to einsum('ni,ij,nj->n', diff, P, diff) but routed through the
-    VRAM-aware GPU path so the reference detector doesn't bottleneck on a single
-    CPU core at 343k frames/run."""
-    device = _device()
-    loc = torch.from_numpy(np.ascontiguousarray(model.location_, dtype=np.float32)).to(device)
-    P = torch.from_numpy(np.ascontiguousarray(model.precision_, dtype=np.float32)).to(device)
-
-    def fn(chunk):
-        diff = chunk - loc
-        return ((diff @ P) * diff).sum(dim=1)
-
-    X = np.ascontiguousarray(X, dtype=np.float32)
-    return chunked_apply(fn, X, device, n_ref=P.shape[0])
+    """Squared Mahalanobis distance, chunked on the GPU (shared `maha_d2`)."""
+    return maha_d2(X, model.location_, model.precision_, _device("Mahalanobis scoring"))
 
 def score_knn(model, X):
     """Mean distance to the k nearest clean neighbours (higher = more OOD).

@@ -18,7 +18,12 @@ from analysis.vmem_utils import split_train_eval, load_phi_seq_lens
 
 def main():
     print("Running severity monotonicity analysis...")
-    all_feats = load_all_features()
+    # Cache one corruption's full severity sweep: the nested c_name -> rep -> sev
+    # loops access {c_name}_L1..5 repeatedly (once per rep and per detector). Since
+    # each run belongs to exactly one corruption, a cache holding the severities
+    # makes every run load from disk exactly ONCE instead of ~14x (rep+detector
+    # passes), without unbounded RAM.
+    all_feats = load_all_features(cache_size=len(cfg.SEVERITIES) + 1)
     
     if 'clean' not in all_feats:
         print("Error: 'clean' run not found.")

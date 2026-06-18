@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vmem_benchmark import benchmark_config as cfg
@@ -88,8 +89,9 @@ def main():
     present = _get_present(all_phi)
     runs = [f"{c}_L{s}" for c in present for s in cfg.SEVERITIES
             if f"{c}_L{s}" in all_phi]
+    print(f"Scoring MDD on {len(runs)} corruption runs...")
 
-    for run in runs:
+    for run in tqdm(runs, desc="MDD scoring"):
         phi = all_phi[run]
         sp = all_phi.get_phi_spatial(run) if use_spatial else None
         corr_branches = mdd.score_branches(phi, sp)

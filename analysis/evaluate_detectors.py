@@ -244,9 +244,12 @@ def main():
     clean_scores = {name: SCORERS[name](model, X_clean_eval)
                     for name, model in detectors.items()}
 
-    for run_name, feats in tqdm(list(all_feats.items()), desc="Evaluating detectors"):
-        if run_name == 'clean':
-            continue
+    # Iterate run names (NOT list(all_feats.items())): materialising the items
+    # view would load every run's phi into RAM at once and defeat the lazy,
+    # memory-bounded loader. Each run is loaded on demand and evicted by the LRU.
+    run_names = sorted(name for name in all_feats if name != 'clean')
+    for run_name in tqdm(run_names, desc="Evaluating detectors"):
+        feats = all_feats[run_name]
 
         X_test = _extract(feats, rep)
         if X_test is None:

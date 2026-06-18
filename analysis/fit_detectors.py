@@ -1,4 +1,5 @@
 import json
+import time
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -108,37 +109,82 @@ def main():
         }, f, indent=2)
 
     detectors = {}
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    n_features = int(X_train.shape[1])
+    n_train = int(len(X_train))
 
-    print("Fitting Mahalanobis...")
+    # Per-detector provenance: exactly which detector was fit on HOW MUCH data,
+    # whether a cap was applied, and how long it took. Saved to fit_manifest.json
+    # so the run is auditable after the fact.
+    manifest = {
+        "representation": rep,
+        "n_clean_total": int(len(X_clean)),
+        "n_train_available": n_train,
+        "n_eval_held_out": int(len(X_clean) - cut),
+        "n_features": n_features,
+        "device": device,
+        "fast_mode": "--fast" in sys.argv,
+        "detectors": {},
+    }
+
+    def _record(name, n_used, capped, t0, extra=None):
+        entry = {"n_fit_samples": int(n_used),
+                 "fraction_of_train": round(n_used / max(1, n_train), 4),
+                 "n_features": n_features,
+                 "capped": bool(capped),
+                 "fit_seconds": round(time.time() - t0, 2),
+                 "device": device}
+        if extra:
+            entry.update(extra)
+        manifest["detectors"][name] = entry
+        print(f"  [fit] {name:<12} {n_used:>8}/{n_train} train samples "
+              f"({entry['fraction_of_train']*100:.1f}%) x {n_features}D | "
+              f"{'CAPPED' if capped else 'FULL'} | {entry['fit_seconds']}s",
+              flush=True)
+
+    print(f"Fitting 6 detectors on '{rep}' "
+          f"({n_train} train x {n_features}D, device={device})...")
+
+    print("Fitting Mahalanobis (Ledoit-Wolf, FULL data)...", flush=True)
     try:
+        t0 = time.time()
         cov = LedoitWolf().fit(X_train)
         detectors['mahalanobis'] = cov
+        _record('mahalanobis', n_train, False, t0)
     except Exception as e:
         print(f"Mahalanobis failed: {e}")
 
-    print("Fitting PCA (Linear AE)...")
+    print("Fitting PCA (FULL data)...", flush=True)
+    t0 = time.time()
     pca = PCA(n_components=min(X_train.shape[0], X_train.shape[1], 64)).fit(X_train)
     detectors['pca'] = pca
+    _record('pca', n_train, False, t0, {"n_components": int(pca.n_components_)})
 
-    print("Fitting kNN...")
+    print("Fitting kNN (FULL reference)...", flush=True)
     # Reference set = the FULL clean train split (cap removed). _subsample is a
     # no-op outside --fast; brute-force kNN in ~2000-D against all clean frames
     # is the infinite-compute setting.
+    t0 = time.time()
     X_knn = _subsample(X_train, n=MAX_FIT_SAMPLES)
     k_nn = max(1, min(5, X_knn.shape[0]))
     knn = NearestNeighbors(n_neighbors=k_nn).fit(X_knn)
     detectors['knn'] = knn
+    _record('knn', len(X_knn), len(X_knn) < n_train, t0, {"k": int(k_nn)})
 
-    print("Fitting GMM...")
+    print(f"Fitting GMM (CAPPED at {GMM_FIT_SAMPLES})...", flush=True)
     try:
         # GMM fits on a capped subset (full-cov EM in 2112-D is impractical on
         # the full split); every other detector still uses all clean data.
+        t0 = time.time()
         X_gmm = _cap_subset(X_train, GMM_FIT_SAMPLES)
         n_comp = min(5, X_gmm.shape[0])  # clamp components to available samples
         gmm = GaussianMixture(n_components=n_comp, covariance_type='full',
                               reg_covar=1e-4, random_state=42,
                               max_iter=1000).fit(X_gmm)  # ceiling raised for convergence
         detectors['gmm'] = gmm
+        _record('gmm', len(X_gmm), len(X_gmm) < n_train, t0,
+                {"n_components": int(n_comp), "converged": bool(gmm.converged_),
+                 "n_iter": int(gmm.n_iter_)})
     except Exception as e:
         print(f"GMM failed: {e}")
 
@@ -151,25 +197,34 @@ def main():
     # ocsvm = OneClassSVM(gamma='auto').fit(X_svm)
     # detectors['ocsvm'] = ocsvm
 
-    print("Fitting AutoEncoder...")
+    print("Fitting AutoEncoder (FULL data, batched)...", flush=True)
+    t0 = time.time()
     ae = fit_ae(X_train)
     torch.save(ae.state_dict(), out_dir / "ae.pt")
+    _record('ae', n_train, False, t0)
 
-    print("Fitting Normalizing Flow (PCA + RealNVP)...")
+    print("Fitting Normalizing Flow (PCA + RealNVP, FULL data)...", flush=True)
     try:
+        t0 = time.time()
         flow_pca = PCA(n_components=min(50, X_train.shape[0], X_train.shape[1]),
                        random_state=42).fit(_subsample(X_train))
-        device = "cuda" if torch.cuda.is_available() else "cpu"
         flow = train_flow_model(flow_pca.transform(X_train), device=device)
         torch.save(flow.cpu().state_dict(), out_dir / "flow.pt")
         joblib.dump(flow_pca, out_dir / "flow_pca.joblib")
+        _record('flow', n_train, False, t0,
+                {"pca_components": int(flow_pca.n_components_)})
     except Exception as e:
         print(f"Normalizing Flow failed: {e}")
 
+    print("Saving detectors...", flush=True)
     for name, model in detectors.items():
         joblib.dump(model, out_dir / f"{name}.joblib")
 
+    with open(out_dir / "fit_manifest.json", "w") as f:
+        json.dump(manifest, f, indent=2)
+
     print(f"Detectors fitted and saved to {out_dir}")
+    print(f"Fit provenance written to {out_dir / 'fit_manifest.json'}")
 
 if __name__ == "__main__":
     main()

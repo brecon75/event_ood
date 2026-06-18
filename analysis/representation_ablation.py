@@ -5,13 +5,15 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from tqdm import tqdm
 from pathlib import Path
+from collections import OrderedDict
+from collections.abc import Mapping
 from sklearn.covariance import EmpiricalCovariance
 from sklearn.metrics import roc_auc_score, average_precision_score, roc_curve
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vmem_benchmark import benchmark_config as cfg
-from analysis.vmem_utils import slice_phi_stat, split_train_eval, load_phi_seq_lens
+from analysis.vmem_utils import slice_phi_stat, split_train_eval, load_phi_seq_lens, chunked_apply
 
 def calc_fpr95(y_true, y_score):
     # Guard single-class input the way vmem_utils.auroc_fpr95 does: roc_curve
@@ -27,7 +29,10 @@ def fit_mahalanobis(train_feat):
     """Fit mean + precision once and return a score(test_feat) closure.
 
     The covariance fit/inversion is O(d^3); callers that score many runs
-    against the same train split must fit once and reuse the closure.
+    against the same train split must fit once and reuse the closure. Scoring
+    runs chunked on the GPU (the closure captures only mu/P, not train_feat), so
+    Stages 9/10/11 — which score every run on the full-dimensional split — are
+    no longer single-core numpy einsum bound.
     """
     try:
         cov = EmpiricalCovariance().fit(train_feat)
@@ -38,70 +43,118 @@ def fit_mahalanobis(train_feat):
         mu = train_feat.mean(axis=0)
         P = np.eye(len(mu))
 
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    mu_t = torch.from_numpy(np.ascontiguousarray(mu, dtype=np.float32)).to(device)
+    P_t = torch.from_numpy(np.ascontiguousarray(P, dtype=np.float32)).to(device)
+
     def score(test_feat):
-        diff = test_feat - mu
-        return np.einsum('ni,ij,nj->n', diff, P, diff)
+        def fn(chunk):
+            diff = chunk - mu_t
+            return ((diff @ P_t) * diff).sum(dim=1)
+        return chunked_apply(fn, np.ascontiguousarray(test_feat, dtype=np.float32),
+                             device, n_ref=P_t.shape[0])
     return score
 
 def get_mahalanobis_scores(train_feat, test_feat):
     return fit_mahalanobis(train_feat)(test_feat)
 
-def load_all_features():
-    phi = {f.stem: torch.load(f, weights_only=True)['phi'].numpy() for f in cfg.PHI_DIR.glob("*.pt")}
-    
-    ann = {}
-    if cfg.ANN_DIR.exists():
-        for f in cfg.ANN_DIR.glob("*.pt"):
-            ann[f.stem] = {k: v.numpy()
-                           for k, v in torch.load(f, weights_only=True).items()
-                           if isinstance(v, torch.Tensor)}
-        
-    spike = {}
-    if cfg.SPIKE_DIR.exists():
-        for f in cfg.SPIKE_DIR.glob("*.pt"):
-            d = torch.load(f, weights_only=True)
-            spike[f.stem] = {k: v.numpy() for k, v in d.items()
-                             if isinstance(v, torch.Tensor)}
-            # Legacy spike files (extracted before monitor.py clamped the
-            # spike rate) contain NaN entropy where p was exactly 0 or 1;
-            # the binary-entropy limit there is 0.
-            if "spike_entropy" in spike[f.stem]:
-                spike[f.stem]["spike_entropy"] = np.nan_to_num(
-                    spike[f.stem]["spike_entropy"], nan=0.0)
-        
-    # We don't necessarily have all representations for all runs if a run
-    # failed. Keep every run that has phi: extract_representation() returns
-    # None for missing parts, and callers skip None — dropping the whole run
-    # here would also exclude it from membrane-only analyses that never need
-    # ANN/spike features.
-    valid_runs = set(phi.keys())
-    for name, d in (("ANN", ann), ("spike", spike)):
-        if d:
-            missing = sorted(valid_runs - set(d.keys()))
-            if missing:
-                print(f"Warning: {len(missing)} run(s) have phi but no {name} "
-                      f"features ({', '.join(missing[:5])}"
-                      f"{', ...' if len(missing) > 5 else ''}); "
-                      f"{name}-based representations will skip them.")
-    
-    fused_dir = cfg.OUTPUT_DIR / "features/fused"
-    fused = {}
-    if fused_dir.exists():
-        for f in fused_dir.glob("*.pt"):
-            d = torch.load(f, weights_only=True, map_location="cpu")
-            fused[f.stem] = {k: (v.numpy() if isinstance(v, torch.Tensor) else v) for k, v in d.items() if v is not None}
-            
-    res = {}
-    for run in valid_runs:
-        res[run] = {
-            'phi': phi[run],
-            'ann': ann.get(run, {}),
-            'spike': spike.get(run, {})
+class LazyFeatures(Mapping):
+    """Lazy, memory-bounded drop-in for the old eager feature dict.
+
+    The eager version loaded EVERY run's phi (+ann/spike/fused) into RAM at
+    once: at full scale that is ~31 runs x ~3 GB ≈ 95 GB resident, which OOMs a
+    cluster node. This loads each run's features from disk ON DEMAND and keeps
+    only a few resident: 'clean' is pinned (every stage reuses it as the
+    reference) and other runs ride a small LRU, so a single-pass stage holds
+    ~1-2 runs at a time.
+
+    Implements the full Mapping interface, so it is a drop-in for code using
+    `'x' in feats`, `feats['x']`, and `for k, v in feats.items()`. NOTE: do NOT
+    wrap `.items()` in `list(...)` — that re-materialises every run and defeats
+    the bound (callers iterate the view directly)."""
+
+    def __init__(self, cache_size: int = 2, verbose: bool = True):
+        self._phi_files = {f.stem: f for f in cfg.PHI_DIR.glob("*.pt")}
+        self._ann_files = ({f.stem: f for f in cfg.ANN_DIR.glob("*.pt")}
+                           if cfg.ANN_DIR.exists() else {})
+        self._spike_files = ({f.stem: f for f in cfg.SPIKE_DIR.glob("*.pt")}
+                             if cfg.SPIKE_DIR.exists() else {})
+        fused_dir = cfg.OUTPUT_DIR / "features/fused"
+        self._fused_files = ({f.stem: f for f in fused_dir.glob("*.pt")}
+                             if fused_dir.exists() else {})
+        self._cache_size = max(1, cache_size)
+        self._verbose = verbose
+        self._cache = OrderedDict()   # run -> feats (LRU; 'clean' pinned apart)
+        self._clean = None
+
+        # One-time missing-feature warning (parity with the eager version).
+        runs = set(self._phi_files)
+        for label, files in (("ANN", self._ann_files), ("spike", self._spike_files)):
+            if files:
+                missing = sorted(runs - set(files))
+                if missing:
+                    print(f"Warning: {len(missing)} run(s) have phi but no {label} "
+                          f"features ({', '.join(missing[:5])}"
+                          f"{', ...' if len(missing) > 5 else ''}); "
+                          f"{label}-based representations will skip them.")
+
+    def _build(self, run):
+        if self._verbose:
+            print(f"  [load] {run}", flush=True)
+        feats = {
+            'phi': torch.load(self._phi_files[run], weights_only=True)['phi'].numpy(),
+            'ann': {}, 'spike': {},
         }
-        if run in fused:
-            res[run]['fused'] = fused[run]
-            
-    return res
+        if run in self._ann_files:
+            feats['ann'] = {k: v.numpy()
+                            for k, v in torch.load(self._ann_files[run], weights_only=True).items()
+                            if isinstance(v, torch.Tensor)}
+        if run in self._spike_files:
+            d = torch.load(self._spike_files[run], weights_only=True)
+            sp = {k: v.numpy() for k, v in d.items() if isinstance(v, torch.Tensor)}
+            # Legacy spike files contain NaN entropy where p was exactly 0 or 1;
+            # the binary-entropy limit there is 0.
+            if "spike_entropy" in sp:
+                sp["spike_entropy"] = np.nan_to_num(sp["spike_entropy"], nan=0.0)
+            feats['spike'] = sp
+        if run in self._fused_files:
+            d = torch.load(self._fused_files[run], weights_only=True, map_location="cpu")
+            feats['fused'] = {k: (v.numpy() if isinstance(v, torch.Tensor) else v)
+                              for k, v in d.items() if v is not None}
+        return feats
+
+    def __getitem__(self, run):
+        if run not in self._phi_files:
+            raise KeyError(run)
+        if run == 'clean':
+            if self._clean is None:
+                self._clean = self._build('clean')
+            return self._clean
+        if run in self._cache:
+            self._cache.move_to_end(run)
+            return self._cache[run]
+        feats = self._build(run)
+        self._cache[run] = feats
+        while len(self._cache) > self._cache_size:
+            self._cache.popitem(last=False)   # evict least-recently-used
+        return feats
+
+    def __iter__(self):
+        return iter(self._phi_files)
+
+    def __len__(self):
+        return len(self._phi_files)
+
+    def __contains__(self, run):
+        return run in self._phi_files
+
+
+def load_all_features(cache_size: int = 2, verbose: bool = True):
+    """Return a lazy, memory-bounded feature mapping (see LazyFeatures).
+
+    Was an eager dict that held all runs in RAM (~95 GB at full scale); now
+    loads on demand so the fit/eval stages stay within a few runs of memory."""
+    return LazyFeatures(cache_size=cache_size, verbose=verbose)
 
 def extract_representation(feats, rep_name):
     """

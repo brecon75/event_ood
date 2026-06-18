@@ -116,7 +116,9 @@ def main():
         layer_feat = slice_phi_layer(clean_phi_train, i)
         if layer_feat.shape[1] > 0:
             scorer = mahalanobis_scorer(layer_feat)
-            layer_scorers.append(scorer)
+            # Store the TRUE layer index with the scorer: if any layer is skipped
+            # (width 0), the list index would no longer equal the layer index.
+            layer_scorers.append((i, scorer))
             score_i = scorer(layer_feat)
             clean_layer_scores.append(score_i)
 
@@ -149,10 +151,10 @@ def main():
             layer_fused_stats = np.concatenate(layer_fused_stats, axis=1)
             run_feats["layer_fused_stats"] = layer_fused_stats
             
-        # Apply per-layer mahalanobis (Task E)
+        # Apply per-layer mahalanobis (Task E) — use the scorer's TRUE layer index.
         run_layer_scores = []
-        for i, scorer in enumerate(layer_scorers):
-            layer_feat = slice_phi_layer(phi, i)
+        for layer_i, scorer in layer_scorers:
+            layer_feat = slice_phi_layer(phi, layer_i)
             if layer_feat.shape[1] > 0:
                 run_layer_scores.append(scorer(layer_feat))
         

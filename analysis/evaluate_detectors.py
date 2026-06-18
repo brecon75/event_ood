@@ -133,7 +133,7 @@ def score_pca(model, X):
     return chunked_apply(fn, X, device, n_ref=comp.shape[1])
 
 def score_ae(model, X):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = _device("AE scoring")
     model = model.to(device)
     model.eval()
 
@@ -147,7 +147,7 @@ def score_ae(model, X):
 def score_flow(model, X):
     """model is a (pca, flow) pair; higher score = more OOD."""
     pca, flow = model
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = _device("flow scoring")
     flow = flow.to(device)
     flow.eval()
 

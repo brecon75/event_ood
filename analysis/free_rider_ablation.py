@@ -324,6 +324,12 @@ def main():
     print("[Random] Loading model + randomizing backbone weights...")
     module, backbone = load_model(device)
     monitor = VmemMonitor(backbone, selected=cfg.PLIF_LAYERS)
+    # Seed BEFORE randomizing so the random weights are reproducible across
+    # invocations. extract_random_run caches per-run phi and resumes; without a
+    # fixed seed a crash+resume would re-randomize to DIFFERENT weights, mixing
+    # phi from two different random networks (clean vs corrupt) and corrupting
+    # the Random-SNN ablation.
+    torch.manual_seed(0)
     randomize_weights(backbone)
     print("[Random] Extracting random clean phi...")
     clean_random = extract_random_run(module, backbone, monitor, "clean", None, 0, seq_dirs, device)

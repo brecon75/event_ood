@@ -166,9 +166,11 @@ def normalizing_flow_scorer(clean, n_components=50):
 
 def autoencoder_scorer(clean):
     device = device_for("Autoencoder training + scoring")
-    fast_mode = "--fast" in sys.argv
-    fit_size = 2000 if fast_mode else 20000
-    fit = _subsample(clean, n=fit_size)
+    # Train on the FULL clean set (consistent with fit_detectors.fit_ae and the
+    # other detectors). `_subsample` is a no-op outside --fast and caps to 500
+    # for smoke tests. (The old `fit_size=20000` looked like a cap but was
+    # silently ignored, since _subsample ignores n outside --fast.)
+    fit = _subsample(clean)
     ae = train_ae_model(fit, device=device)
     
     def score(x):

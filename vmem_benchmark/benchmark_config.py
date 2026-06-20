@@ -61,7 +61,9 @@ CLEAN_TRAIN_RATIO = 0.7
 # ---------------------------------------------------------------------------
 DEVICE      = "cuda"   # or "cpu"
 BATCH_SIZE  = 1        # histograms per batch (each ~5.6 MB on GPU)
-TRAJ_SAVE_N = 50       # save trajectories for first N histogram frames only
+TRAJ_SAVE_N = 50       # save trajectories for first N histogram frames only (0 disables; see --traj-save-n)
+SAVE_ANN    = True     # collect/save ANN GAP features (asab/last_ann/head_cls). Off via --no-ann.
+SAVE_SPIKE  = True     # collect/save spike-rate/entropy stats. Off via --no-spike.
 
 # ---------------------------------------------------------------------------
 # Sequence cap — stop after this many sequences. Set to None or 470 for the full split.

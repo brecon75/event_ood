@@ -78,6 +78,9 @@ def resolve_defaults_and_args():
     parser.add_argument("--vram-fraction", type=float, default=1.0, help="Fraction of GPU VRAM PyTorch is allowed to allocate (0.0 to 1.0). Set to 1.0 for unlimited.")
     parser.add_argument("--skip-clean", action="store_true", help="Skip running the clean/baseline run")
     parser.add_argument("--clean-only", action="store_true", help="Run only the clean/baseline pass (no corruptions)")
+    parser.add_argument("--traj-save-n", type=int, help="Override TRAJ_SAVE_N (0 disables trajectory saving)")
+    parser.add_argument("--no-ann", action="store_true", help="Skip ANN GAP feature collection/saving (also skips the FPN+head compute)")
+    parser.add_argument("--no-spike", action="store_true", help="Skip spike-rate/entropy collection/saving")
     
     
     # We parse known args so it doesn't break if run inside environment frameworks with extra args
@@ -225,6 +228,12 @@ def resolve_defaults_and_args():
         cfg.PLIF_LAYERS = args.plif_layers
     cfg.VRAM_FRACTION = args.vram_fraction
     cfg.SKIP_CLEAN = args.skip_clean
+    if args.traj_save_n is not None:
+        cfg.TRAJ_SAVE_N = args.traj_save_n
+    if args.no_ann:
+        cfg.SAVE_ANN = False
+    if args.no_spike:
+        cfg.SAVE_SPIKE = False
 
 
     # Dynamically inject resolved HybridDetection and event_corruption to sys.path
@@ -471,7 +480,7 @@ def run_benchmark():
 
         tgap_path = cfg.OUTPUT_DIR / "temporal_gap" / f"{run_name}.pt"
         ann_path = cfg.ANN_DIR / f"{run_name}.pt"
-        if phi_path.exists() and tgap_path.exists() and ann_path.exists():
+        if phi_path.exists() and tgap_path.exists() and (ann_path.exists() or not cfg.SAVE_ANN):
             existing = torch.load(phi_path, weights_only=True, map_location="cpu")
             done_seqs_saved = set(existing.get('done_seqs', []))
             del existing
@@ -554,22 +563,24 @@ def run_benchmark():
                     padded_batch = module.input_padder.pad_tensor_ev_repr(batch)
                     backbone_features, h_c = module.mdl.forward_backbone(x=padded_batch, h_c=h_c)
                     
-                    # Extract ANN/ASAB features
-                    x_1 = backbone_features[2]
-                    asab_gap = x_1.mean(dim=(2, 3)).cpu()
-                    seq_asab_gap_cpu.append(asab_gap)
-                    
-                    x_3 = backbone_features[4]
-                    last_ann_gap = x_3.mean(dim=(2, 3)).cpu()
-                    seq_last_ann_gap_cpu.append(last_ann_gap)
-                    
-                    # Run FPN and classification head for level 0 (stride 8)
-                    fpn_features = module.mdl.fpn(backbone_features)
-                    x_stem = module.mdl.yolox_head.stems[0](fpn_features[0])
-                    cls_feat = module.mdl.yolox_head.cls_convs[0](x_stem)
-                    cls_output = module.mdl.yolox_head.cls_preds[0](cls_feat)
-                    head_cls_L0_gap = cls_output.mean(dim=(2, 3)).cpu()
-                    seq_head_cls_L0_gap_cpu.append(head_cls_L0_gap)
+                    # Extract ANN/ASAB features (skipped via --no-ann; also avoids
+                    # the extra FPN + classification-head forward below)
+                    if cfg.SAVE_ANN:
+                        x_1 = backbone_features[2]
+                        asab_gap = x_1.mean(dim=(2, 3)).cpu()
+                        seq_asab_gap_cpu.append(asab_gap)
+
+                        x_3 = backbone_features[4]
+                        last_ann_gap = x_3.mean(dim=(2, 3)).cpu()
+                        seq_last_ann_gap_cpu.append(last_ann_gap)
+
+                        # Run FPN and classification head for level 0 (stride 8)
+                        fpn_features = module.mdl.fpn(backbone_features)
+                        x_stem = module.mdl.yolox_head.stems[0](fpn_features[0])
+                        cls_feat = module.mdl.yolox_head.cls_convs[0](x_stem)
+                        cls_output = module.mdl.yolox_head.cls_preds[0](cls_feat)
+                        head_cls_L0_gap = cls_output.mean(dim=(2, 3)).cpu()
+                        seq_head_cls_L0_gap_cpu.append(head_cls_L0_gap)
 
                     # Run downstream YOLOX detection head to get predictions (B, anchors, 7)
                     predictions, _ = module.mdl.forward_detect(backbone_features=backbone_features)
@@ -616,11 +627,12 @@ def run_benchmark():
                 if tgap_batch.numel() > 0:
                     seq_temporal_gap_cpu.append(tgap_batch)
 
-                # Collect spike stats online
-                sp_stats = monitor.collect_spikes()
-                if sp_stats['spike_rate'].numel() > 0:
-                    seq_spike_rate_cpu.append(sp_stats['spike_rate'])
-                    seq_spike_entropy_cpu.append(sp_stats['spike_entropy'])
+                # Collect spike stats online (skipped via --no-spike)
+                if cfg.SAVE_SPIKE:
+                    sp_stats = monitor.collect_spikes()
+                    if sp_stats['spike_rate'].numel() > 0:
+                        seq_spike_rate_cpu.append(sp_stats['spike_rate'])
+                        seq_spike_entropy_cpu.append(sp_stats['spike_entropy'])
 
                 # Collect trajectory snapshots
                 if n_trajs_saved < cfg.TRAJ_SAVE_N:
@@ -754,14 +766,14 @@ def run_benchmark():
                 ["temporal_gap"], run_name, log=overall_pbar.write):
             overall_pbar.write(f"  Saved temporal gap -> {run_name}.pt")
 
-        if _merge_seq_artifact(
+        if cfg.SAVE_ANN and _merge_seq_artifact(
                 cfg.ANN_DIR / f"_tmp_{run_name}",
                 cfg.ANN_DIR / f"{run_name}.pt",
                 ["asab_gap", "last_ann_gap", "head_cls_L0_gap"],
                 run_name, log=overall_pbar.write):
             overall_pbar.write(f"  Saved ANN features -> {run_name}.pt")
 
-        if _merge_seq_artifact(
+        if cfg.SAVE_SPIKE and _merge_seq_artifact(
                 cfg.SPIKE_DIR / f"_tmp_{run_name}",
                 cfg.SPIKE_DIR / f"{run_name}.pt",
                 ["spike_rate", "spike_entropy"], run_name, log=overall_pbar.write):

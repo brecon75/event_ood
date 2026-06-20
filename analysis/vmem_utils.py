@@ -33,6 +33,39 @@ TABLE_DIR       = cfg.OUTPUT_DIR / "tables"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# I/O helpers — memory-mapped .pt loading.
+#
+# φ files store `phi` (~3 GB/run) AND `phi_spatial` (~2 GB/run) in one archive,
+# but most stages use only `phi`. A plain torch.load deserialises the WHOLE file
+# into RAM, so every φ-only stage paid to read ~2 GB/run of phi_spatial it never
+# touches, and `load_phi_seq_lens` deserialised the entire ~5 GB clean.pt just to
+# read a tiny list. `mmap=True` faults only the pages actually accessed: reading
+# `phi` never touches phi_spatial's bytes, and reading `seq_lens` touches neither.
+# This both cuts disk reads (~40%/run for φ-only stages) and lets the OS page
+# cache serve repeated reads across stages. Falls back to an eager load for
+# legacy-format files or platforms where mmap is unsupported.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def load_pt(path, mmap: bool = True):
+    """torch.load with per-tensor lazy mmap faulting and a graceful fallback."""
+    try:
+        return torch.load(path, map_location="cpu", weights_only=True, mmap=mmap)
+    except (RuntimeError, ValueError, TypeError):
+        return torch.load(path, map_location="cpu", weights_only=True)
+
+
+def materialize_f32(t) -> np.ndarray:
+    """Copy ONE tensor's data into a writable float32 numpy array, reading only
+    that tensor's bytes off disk (so a sibling phi_spatial is never faulted in).
+    np.array(..., copy) also strips the read-only flag of an mmap-backed view, so
+    downstream torch.from_numpy stays warning-free."""
+    return np.array(t.numpy(), dtype=np.float32)
+
+
+_SEQ_LENS_CACHE = {}   # path-string -> seq_lens (memoise the metadata reads)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Shared clean train/eval split.
 #
 # Frames within a sequence are temporally correlated, so random frame-level
@@ -69,6 +102,17 @@ def split_train_eval(arr, train_ratio: float = TRAIN_RATIO, seq_lens=None):
     return arr[:cut], arr[cut:]
 
 
+def held_out_eval(arr, train_ratio: float = TRAIN_RATIO, seq_lens=None):
+    """Held-out eval slice [cut:] of a run.
+
+    Used for corrupted POSITIVES so they are drawn from the same held-out
+    sequences as the clean negatives: a corruption run is cut at the same
+    sequence-aligned boundary as clean, and only the eval tail is scored. This
+    keeps clean-vs-corrupt AUROC on matched held-out content (the train-portion
+    sequences, whose clean twins the detector was fitted on, are excluded)."""
+    return split_train_eval(arr, train_ratio, seq_lens)[1]
+
+
 def load_phi_seq_lens(run_name: str = "clean", artifact_dir=None):
     """Per-sequence frame counts saved by extract.py, or None for legacy files.
 
@@ -76,13 +120,19 @@ def load_phi_seq_lens(run_name: str = "clean", artifact_dir=None):
     directory (temporal_phi, spike, ...) works — they all share the metadata.
     """
     f = (artifact_dir or cfg.PHI_DIR) / f"{run_name}.pt"
+    ck = str(f)
+    if ck in _SEQ_LENS_CACHE:
+        return _SEQ_LENS_CACHE[ck]
     if not f.exists():
         return None
     try:
-        d = torch.load(f, map_location="cpu", weights_only=True)
-        return d.get("seq_lens", None)
+        # mmap: faults only the small metadata, not the multi-GB phi tensors.
+        d = load_pt(f)
+        sl = d.get("seq_lens", None)
     except Exception:
-        return None
+        sl = None
+    _SEQ_LENS_CACHE[ck] = sl
+    return sl
 
 
 def load_phi_spatial(run_name: str = "clean"):
@@ -96,9 +146,10 @@ def load_phi_spatial(run_name: str = "clean"):
     if not f.exists():
         return None
     try:
-        d = torch.load(f, map_location="cpu", weights_only=True)
+        # mmap: faults only phi_spatial's pages, not the sibling phi tensor.
+        d = load_pt(f)
         ps = d.get("phi_spatial", None)
-        return ps.float().numpy() if ps is not None else None
+        return materialize_f32(ps) if ps is not None else None
     except Exception:
         return None
 
@@ -171,9 +222,12 @@ class LazyPhiDict:
 
         f = self._available[key]
         try:
-            d = torch.load(f, map_location="cpu", weights_only=True)
-            arr = d["phi"].float().numpy()
+            # mmap + materialize only phi: a sibling phi_spatial (~2 GB/run) is
+            # never read off disk, and seq_lens faults just its tiny metadata.
+            d = load_pt(f)
+            arr = materialize_f32(d["phi"])
             self._seq_lens[key] = d.get("seq_lens", None)
+            del d
             if self.fast_mode:
                 rng = np.random.default_rng(42)
                 n = min(len(arr), 2000)
@@ -207,9 +261,10 @@ class LazyPhiDict:
         if key not in self._available or self.fast_mode:
             return None
         try:
-            d = torch.load(self._available[key], map_location="cpu", weights_only=True)
+            # mmap: faults only phi_spatial's pages, not the sibling phi tensor.
+            d = load_pt(self._available[key])
             ps = d.get("phi_spatial", None)
-            return ps.float().numpy() if ps is not None else None
+            return materialize_f32(ps) if ps is not None else None
         except Exception:
             return None
 
@@ -388,17 +443,39 @@ def device_for(op: str, verbose: bool = True) -> str:
     return "cpu"
 
 
-def query_chunk_rows(n_ref: int, device, frac: float = 0.25,
+# Fraction of FREE VRAM one (chunk x n_ref) buffer is sized to occupy. Larger =
+# bigger chunks = fewer kernel launches / better GPU saturation, at the cost of a
+# few `chunked_apply` OOM-halving probes when an op's temporaries don't fit (the
+# halving then converges to the largest chunk that DOES fit — so this is a "fill
+# the GPU without OOM" dial, safe to push up). Default tuned conservatively;
+# bump it via `set_vram_chunk_frac` (the combined runner exposes --vram-frac).
+_VRAM_CHUNK_FRAC = 0.25
+# Upper clamp on rows/chunk. Scales with the frac so a big GPU + a small n_ref op
+# (e.g. Mahalanobis) actually gets large chunks instead of being capped low.
+_CHUNK_ROW_CAP = 131072
+
+
+def set_vram_chunk_frac(frac: float):
+    """Set the global free-VRAM fraction used to size GPU chunks, and scale the
+    row cap with it so the dial actually takes effect on large GPUs."""
+    global _VRAM_CHUNK_FRAC, _CHUNK_ROW_CAP
+    _VRAM_CHUNK_FRAC = max(0.05, min(0.95, float(frac)))
+    _CHUNK_ROW_CAP = int(131072 * max(1.0, _VRAM_CHUNK_FRAC / 0.25))
+
+
+def query_chunk_rows(n_ref: int, device, frac: float = None,
                      bytes_per_cell: int = 4) -> int:
     """Rows per chunk so a (chunk x n_ref) float32 buffer uses ~`frac` of FREE
     GPU memory. CPU has no VRAM limit → a large fixed chunk. Call this AFTER the
-    reference tensor is already on the device, so its memory is excluded."""
+    reference tensor is already on the device, so its memory is excluded.
+    `frac=None` uses the tunable global `_VRAM_CHUNK_FRAC`."""
     if str(device) != "cuda" or not torch.cuda.is_available():
         return 50000
+    frac = _VRAM_CHUNK_FRAC if frac is None else frac
     try:
         free, _ = torch.cuda.mem_get_info()
         rows = int(free * frac / (max(1, n_ref) * bytes_per_cell))
-        return int(np.clip(rows, 256, 131072))
+        return int(np.clip(rows, 256, _CHUNK_ROW_CAP))
     except Exception:
         return 8192
 

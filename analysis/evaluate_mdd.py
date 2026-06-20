@@ -94,6 +94,16 @@ def main():
     for run in tqdm(runs, desc="MDD scoring"):
         phi = all_phi[run]
         sp = all_phi.get_phi_spatial(run) if use_spatial else None
+        # Positives = held-out tail of the run only, drawn from the same
+        # sequences as the clean negatives (phi_eval). Cut at the same
+        # sequence-aligned boundary as clean so the train-portion frames (whose
+        # clean twins the MDD was fitted/calibrated on) are excluded.
+        run_seq_lens_full = all_phi.get_seq_lens(run)
+        run_cut = split_boundary(len(phi), TRAIN_RATIO, run_seq_lens_full)
+        phi = phi[run_cut:]
+        sp = sp[run_cut:] if sp is not None else None
+        # per-sequence frame counts for the held-out tail (mirrors eval_seq_lens)
+        run_seq_lens = seq_lens_after_cut(run_seq_lens_full, run_cut)
         corr_branches = mdd.score_branches(phi, sp)
         corr_branches.pop("fused", None)
 
@@ -104,7 +114,6 @@ def main():
 
         corruption, sev = run.rsplit("_L", 1)
         sev = int(sev)
-        run_seq_lens = all_phi.get_seq_lens(run)
 
         for branch in list(corr_branches.keys()):
             cs, ts = clean_branches[branch], corr_branches[branch]

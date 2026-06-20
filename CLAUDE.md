@@ -34,6 +34,10 @@ python analysis/fit_detectors.py
 # Score all detectors on corrupted runs
 python analysis/evaluate_detectors.py
 
+# Score the MDD (radius + RCF + deep-layer + spatial branches) — per-frame and
+# per-sequence; writes results/mdd_metrics.csv and results/mdd_metrics_aggregated.csv
+python analysis/evaluate_mdd.py
+
 # Run all analysis scripts and generate plots
 python analysis/analyse.py
 

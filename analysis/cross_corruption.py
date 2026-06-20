@@ -8,7 +8,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vmem_benchmark import benchmark_config as cfg
 from analysis.representation_ablation import load_all_features, extract_representation
-from analysis.vmem_utils import split_train_eval, load_phi_seq_lens
+from analysis.vmem_utils import split_train_eval, held_out_eval, load_phi_seq_lens
 from analysis.gpu_fit import logreg_fit
 
 def main():
@@ -30,13 +30,17 @@ def main():
         return
         
     # We aggregate all severities of hot_pixel to train the detector
+    # Positive TRAINING data = the TRAIN portion of each hot_pixel run only, so
+    # the corrupted-train frames stay disjoint from the held-out tails used for
+    # evaluation below (val-only evaluation on both clean and corrupted sides).
     X_train_corr = []
     for sev in cfg.SEVERITIES:
         run_name = f"hot_pixel_L{sev}"
         if run_name in all_feats:
             feats = extract_representation(all_feats[run_name], rep)
             if feats is not None:
-                X_train_corr.append(feats)
+                feats_tr, _ = split_train_eval(feats, seq_lens=load_phi_seq_lens(run_name))
+                X_train_corr.append(feats_tr)
                 
     if not X_train_corr:
         print("Error: 'hot_pixel' runs not found for training.")
@@ -73,7 +77,10 @@ def main():
             
             X_test_corr = extract_representation(all_feats[run_name], rep)
             if X_test_corr is None: continue
-            
+            # Positives = held-out tail of the eval-corruption run only, matched
+            # to the clean negatives' held-out sequences (X_clean_eval).
+            X_test_corr = held_out_eval(X_test_corr, seq_lens=load_phi_seq_lens(run_name))
+
             X_test = np.concatenate([X_clean_eval, X_test_corr], axis=0)
             y_test = np.concatenate([np.zeros(len(X_clean_eval)), np.ones(len(X_test_corr))])
             

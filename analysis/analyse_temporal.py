@@ -11,7 +11,7 @@ from vmem_benchmark import benchmark_config as cfg
 
 from analysis.vmem_utils import (
     TABLE_DIR, load_all_temporal_phi, load_traj_as_temporal_phi,
-    auroc_fpr95, _get_present, split_train_eval, load_phi_seq_lens,
+    auroc_fpr95, _get_present, split_train_eval, held_out_eval, load_phi_seq_lens,
 )
 from analysis.vmem_models import prepare_temporal_ae_input
 from analysis.vmem_scorers import mahalanobis_scorer, temporal_autoencoder_scorer
@@ -151,6 +151,9 @@ def run_temporal_analysis(all_phi):
             
             if rn in all_tphi:
                 tp = all_tphi[rn]
+                # held-out tail only — matched to hc_clean_scores' held-out split
+                tp = held_out_eval(
+                    tp, seq_lens=load_phi_seq_lens(rn, cfg.OUTPUT_DIR / "temporal_phi"))
                 yt_hc = np.concatenate([np.zeros(len(hc_clean_scores)), np.ones(len(tp))])
                 ys_hc = np.concatenate([hc_clean_scores, hc_scorer(tp)])
                 a_hc, _ = auroc_fpr95(yt_hc, ys_hc)
@@ -160,16 +163,21 @@ def run_temporal_analysis(all_phi):
 
             if ta_scorer is not None and rn in all_prepared_trajs:
                 prep_traj = all_prepared_trajs[rn]
+                traj_seq_lens = None  # raw-traj fallback has none → plain ratio cut
                 if isinstance(prep_traj, Path):
                     # Lazy load: keep only one run's GAP tensor in RAM at a time
                     try:
-                        prep_traj = torch.load(
+                        _d = torch.load(
                             prep_traj, map_location="cpu", weights_only=True
-                        )["temporal_gap"]
+                        )
+                        prep_traj = _d["temporal_gap"]
+                        traj_seq_lens = _d.get("seq_lens", None)
                     except Exception as e:
                         print(f"    Failed to load {rn} temporal gap: {e}")
                         ta_aurocs.append(float("nan"))
                         continue
+                # held-out tail only — matched to ta_clean_scores' held-out split
+                prep_traj = held_out_eval(prep_traj, seq_lens=traj_seq_lens)
                 ta_scores = ta_scorer(prep_traj)
                 del prep_traj
                 yt_ta = np.concatenate([np.zeros(len(ta_clean_scores)), np.ones(len(ta_scores))])

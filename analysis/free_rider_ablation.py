@@ -26,7 +26,7 @@ from vmem_benchmark.corruption_wrap import apply_corruption_to_tensor
 from spikingjelly.clock_driven import functional
 
 from analysis.vmem_scorers import mahalanobis_scorer
-from analysis.vmem_utils import auroc_fpr95, split_train_eval
+from analysis.vmem_utils import auroc_fpr95, split_train_eval, held_out_eval, load_pt, materialize_f32
 from analysis.analyse_plots import plot_free_rider_ablation
 
 # ---------------------------------------------------------------------------
@@ -150,10 +150,11 @@ def load_trained_phi(run_name, max_seq):
     f = cfg.PHI_DIR / f"{run_name}.pt"
     if not f.exists():
         return None, 0
-    d = torch.load(f, map_location="cpu", weights_only=True)
-    phi = d["phi"].float()
-    sliced, k = _slice_first_seqs(phi, d.get("seq_lens"), max_seq)
-    return sliced.numpy(), (k if k is not None else "all")
+    # mmap: slicing the first sequences faults only those phi rows (and never
+    # the sibling phi_spatial); materialize the slice into a writable f32 array.
+    d = load_pt(f)
+    sliced, k = _slice_first_seqs(d["phi"], d.get("seq_lens"), max_seq)
+    return materialize_f32(sliced), (k if k is not None else "all")
 
 
 def compute_raw_run(seq_dirs, c_name, severity):
@@ -248,6 +249,10 @@ def make_scorer(clean_X):
 
 
 def auroc_vs_clean(scorer, clean_scores, X):
+    # Positives = held-out tail of the run only, cut with the same plain ratio
+    # as the clean negatives in make_scorer (no seq_lens here), so both classes
+    # come from the matched held-out portion.
+    X = held_out_eval(X)
     yt = np.concatenate([np.zeros(len(clean_scores)), np.ones(len(X))])
     ys = np.concatenate([clean_scores, scorer(X)])
     a, _ = auroc_fpr95(yt, ys)

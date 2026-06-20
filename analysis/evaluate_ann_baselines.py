@@ -10,7 +10,8 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vmem_benchmark import benchmark_config as cfg
 from analysis.vmem_utils import (
-    split_train_eval, load_phi_seq_lens, chunked_apply, knn_score, device_for,
+    split_train_eval, load_phi_seq_lens, chunked_apply, knn_score,
+    device_for, split_boundary, TRAIN_RATIO,
 )
 from analysis.gpu_fit import ledoit_wolf_precision
 import functools
@@ -366,7 +367,13 @@ def evaluate_representation(rep_name, rep_dir):
         
         d = torch.load(f, weights_only=True, map_location="cpu")
         t_feats, t_logits = d["feat"], d["logit"]
-        
+
+        # Positives = held-out tail of the run only, matched to the clean
+        # negatives' held-out sequences. feat/logit are row-aligned, so cut both
+        # at the same sequence-aligned boundary.
+        run_cut = split_boundary(len(t_feats), TRAIN_RATIO, load_phi_seq_lens(run_name))
+        t_feats, t_logits = t_feats[run_cut:], t_logits[run_cut:]
+
         parts = run_name.rsplit('_L', 1)
         corruption = parts[0]
         severity = int(parts[1]) if len(parts) > 1 else 0

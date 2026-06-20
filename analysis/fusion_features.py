@@ -7,7 +7,9 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vmem_benchmark import benchmark_config as cfg
 from analysis.vmem_scorers import mahalanobis_scorer
-from analysis.vmem_utils import slice_phi_layer, split_train_eval, load_phi_seq_lens
+from analysis.vmem_utils import (
+    slice_phi_layer, split_train_eval, load_phi_seq_lens, load_pt, materialize_f32,
+)
 
 
 def _load_run(run_name):
@@ -20,8 +22,8 @@ def _load_run(run_name):
     phi_path = cfg.PHI_DIR / f"{run_name}.pt"
     if not phi_path.exists():
         return None
-    feats = {"membrane_stats": torch.load(phi_path, weights_only=True,
-                                          map_location="cpu")["phi"].numpy()}
+    # mmap + materialize only phi: the sibling phi_spatial is not read here.
+    feats = {"membrane_stats": materialize_f32(load_pt(phi_path)["phi"])}
 
     mh_path = cfg.OUTPUT_DIR / "features/margin_hist" / f"{run_name}.pt"
     if mh_path.exists():

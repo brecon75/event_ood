@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vmem_benchmark import benchmark_config as cfg
 from analysis.representation_ablation import load_all_features, extract_representation, get_mahalanobis_scores
 from analysis.evaluate_detectors import SCORERS
-from analysis.vmem_utils import split_train_eval, load_phi_seq_lens
+from analysis.vmem_utils import split_train_eval, held_out_eval, load_phi_seq_lens
 
 def main():
     print("Running severity monotonicity analysis...")
@@ -110,6 +110,8 @@ def main():
 
                 test_feat = extract_representation(all_feats[run_name], rep)
                 if test_feat is None: continue
+                # held-out tail only — matched to the clean (sev 0) negatives
+                test_feat = held_out_eval(test_feat, seq_lens=load_phi_seq_lens(run_name))
 
                 try:
                     scores = get_mahalanobis_scores(train_fit, test_feat)
@@ -141,6 +143,8 @@ def main():
                 if run_name not in all_feats: continue
                 test_feat = extract_representation(all_feats[run_name], det_rep)
                 if test_feat is None: continue
+                # held-out tail only — matched to the clean (sev 0) negatives
+                test_feat = held_out_eval(test_feat, seq_lens=load_phi_seq_lens(run_name))
 
                 try:
                     scores = score_fn(d_model, test_feat)

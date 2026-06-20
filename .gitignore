@@ -54,3 +54,4 @@ test_ideas_seq_lens.npy
 tests/
 pytest.ini
 run_analysis_tests.py
+test_ideas/

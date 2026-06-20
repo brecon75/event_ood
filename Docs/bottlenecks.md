@@ -103,12 +103,43 @@ baselines' covariance/eigh/pinv. These are one-time and bounded (caps above, or
 small 512-D), and can't move to the GPU without reimplementing the estimators.
 **All per-frame SCORING across the pipeline is now on the GPU.**
 
+## Resolved (IO round)
+
+- **Whole-file reads for φ-only stages — FIXED.** Every φ consumer used a plain
+  `torch.load`, which deserialises the WHOLE archive into RAM — including
+  `phi_spatial` (~2 GB/run), which only the MDD uses. Stages 6/7/9/10/11/12/14
+  paid to read ~2 GB/run they never touch. All φ reads now go through
+  `vmem_utils.load_pt` (`torch.load(mmap=True)`, graceful fallback) +
+  `materialize_f32`, which faults only the accessed tensor's pages: reading `phi`
+  never touches `phi_spatial`'s bytes. Cuts per-run disk reads ~40% for the
+  φ-only stages and bounds RAM to the phi tensor alone. Patched in `LazyPhiDict`,
+  `LazyFeatures._build`, `fusion_features._load_run`,
+  `free_rider_ablation.load_trained_phi`, `load_phi_spatial`/`get_phi_spatial`.
+
+- **`load_phi_seq_lens` deserialised ~5 GB to read a list — FIXED.** It opened the
+  full `clean.pt` just to read the tiny `seq_lens` metadata, repeatedly across
+  stages. Now mmap'd (faults only the metadata) and memoised in-process
+  (`_SEQ_LENS_CACHE`), so repeat calls are free.
+
+- **Cross-stage re-reads — FIXED (opt-in runner).** `analysis/run_phi_stages.py`
+  runs the φ-consuming stages (fit_detectors, evaluate_detectors, evaluate_mdd,
+  representation_ablation, severity, reliability, cross_corruption, analyse) in
+  ONE process sharing a single resident loader, so each run's φ is read from disk
+  **exactly once** and reused by every stage (verified: 6/6 runs load once across
+  all 8 stages). It changes no stage script — it builds one shared `LazyFeatures`
+  and monkeypatches the loader factory in each stage's namespace, with a thin
+  `PhiDictView` serving the `LazyPhiDict` consumers (MDD/analyse) from the same
+  arrays so φ is never duplicated between the two loader interfaces. Full
+  residency by default; `--max-resident N` caps RAM (LRU, 'clean' pinned) on
+  smaller nodes, degrading gracefully to per-stage re-reads. The separate
+  per-stage scripts still work standalone (now with the mmap savings above).
+
 ## Remaining (lower priority)
 
-- **IO across stages.** φ is still re-read from disk by each φ-consuming stage
-  (7/9/10/11). Within a stage it is now read once; across stages it is re-read.
-  Options if this dominates: store φ as memory-mappable arrays, or run the
-  φ-only stages in one process sharing a warm loader.
+- **Producer stages still independent.** extract / offline-features / fusion /
+  ANN-baselines run as their own processes (they create artifacts rather than
+  re-reading φ, so they are not part of the combined runner). No further IO lever
+  identified for the φ path.
 
 - **Host RAM for stage 6** at full scale: X_train (~2 GB) + LedoitWolf
   covariance/precision (2252² × 8 B ≈ 40 MB each) + sklearn copies. Provision a

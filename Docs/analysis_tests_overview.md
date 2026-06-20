@@ -299,4 +299,4 @@ Internally calls sub-modules in `analyse_comparisons.py`, `analyse_plots.py`, an
 ---
 
 *Document created: June 2026.*  
-*See also: `Docs/implementation_status.tex` for the full benchmark feature checklist, and `Docs/Findings.md` for empirical findings.*
+*See also: `Docs/implementation_status.tex` for the full benchmark feature checklist, `Docs/Findings.md` for empirical findings (note: the temporal "rescue to ~0.85" claim there is **retracted** — see §5), and `Docs/performance_brief.md` for the corrected performance audit and the catalogue of tested improvement levers.*

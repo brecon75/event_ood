@@ -61,3 +61,22 @@ python analyse.py
 ```powershell
 python analyse.py --output-dir "D:/my_custom_run_outputs" --fast
 ```
+
+### Run all φ-analysis stages with φ read once
+
+`analyse.py` is one of several φ-consuming stages. To run the whole set
+(`fit_detectors`, `eval_detectors`, `mdd`, `representation_ablation`, `severity`,
+`reliability`, `cross_corruption`, `analyse`) **in one process that reads each
+run's φ from disk only once** (instead of each stage re-reading it), use the
+combined runner from the **repo root**:
+
+```powershell
+python analysis/run_phi_stages.py                       # all stages, φ read once
+python analysis/run_phi_stages.py --stages eval_detectors mdd analyse   # only these
+python analysis/run_phi_stages.py --skip analyse reliability            # all but these
+python analysis/run_phi_stages.py --max-resident 8      # cap RAM (LRU; clean pinned)
+```
+
+All φ loads are memory-mapped, so φ-only stages skip the ~2 GB/run `phi_spatial`
+they never use. See the root `HOW_TO_RUN.md` §4–§5 for the full flag table, RAM
+notes, and I/O details.

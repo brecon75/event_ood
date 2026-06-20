@@ -10,7 +10,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vmem_benchmark import benchmark_config as cfg
 from analysis.representation_ablation import load_all_features, get_mahalanobis_scores, extract_representation
-from analysis.vmem_utils import split_train_eval, load_phi_seq_lens
+from analysis.vmem_utils import split_train_eval, load_phi_seq_lens, split_boundary, TRAIN_RATIO
 
 def compute_detection_metric(det_outputs, conf_thresh=0.3):
     """
@@ -101,15 +101,23 @@ def main():
             print(f"Skipping {run_name} due to shape mismatch.")
             continue
 
+        # Decide clean/corrupt point-to-point pairing on the FULL-run lengths
+        # (before slicing), then restrict everything to the held-out tail so the
+        # correlation uses only val sequences — matched to how the OOD scorer was
+        # fitted on the clean-train portion.
+        paired = (len(clean_det_metric) == len(corr_det_metric))
+        run_cut = split_boundary(len(test_feat), TRAIN_RATIO, load_phi_seq_lens(run_name))
+        test_feat = test_feat[run_cut:]
+        corr_det_metric = corr_det_metric[run_cut:]
+
         ood_scores = get_mahalanobis_scores(train_fit, test_feat)
 
-        # Degradation: clean metric - corrupt metric
-        # Ensure we can pair them (assume sequence alignment if sizes match)
-        if len(clean_det_metric) == len(corr_det_metric):
-            degradation = clean_det_metric - corr_det_metric
+        # Degradation: clean metric - corrupt metric (point-to-point on the tail)
+        if paired:
+            degradation = clean_det_metric[run_cut:] - corr_det_metric
         else:
-            # If sequence dropping occurred differently, we cannot do point-to-point.
-            # We'll just correlate OOD score with the metric directly instead of degradation.
+            # Sequence dropping differed: can't pair point-to-point. Correlate
+            # the OOD score with the (tail) metric directly instead.
             degradation = -corr_det_metric # higher degradation = fewer boxes
 
         # Guard: correlation functions require at least 2 samples and non-constant arrays

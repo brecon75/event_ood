@@ -12,7 +12,7 @@ from vmem_benchmark import benchmark_config as cfg
 
 from analysis.vmem_utils import (
     LAYER_SPECS, TABLE_DIR, slice_phi_layer, slice_phi_stat,
-    auroc_fpr95, _get_present, _valid_layers, split_train_eval,
+    auroc_fpr95, _get_present, _valid_layers, split_train_eval, held_out_eval,
     load_phi_seq_lens,
 )
 from analysis.vmem_scorers import (
@@ -163,7 +163,7 @@ def _build_detectors(clean_train):
         "kNN (k=5)":        knn_scorer(clean_train, k=5),
         "GMM":              gmm_scorer(clean_train, n_components=5),
         "PCA-Mahal":        pca_mahalanobis_scorer(clean_train, n_components=50),
-        "One-Class SVM":    ocsvm_scorer(clean_train),
+        # "One-Class SVM":    ocsvm_scorer(clean_train),  # disabled: O(n^2) on full data
         "Normalizing Flow": normalizing_flow_scorer(clean_train, n_components=50),
         "Autoencoder":      autoencoder_scorer(clean_train),
     }

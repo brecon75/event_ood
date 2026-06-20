@@ -13,7 +13,7 @@ from vmem_benchmark import benchmark_config as cfg
 from analysis.representation_ablation import load_all_features, extract_representation, calc_fpr95
 from analysis.vmem_utils import (
     TRAIN_RATIO, split_boundary, load_phi_seq_lens, chunked_apply, knn_score,
-    device_for, maha_d2,
+    device_for, maha_d2, held_out_eval,
 )
 from analysis.fit_detectors import SimpleAE
 from analysis.vmem_models import RealNVP
@@ -249,6 +249,10 @@ def main():
         if X_test is None:
             print(f"Warning: no '{rep}' representation for {run_name} — skipping.")
             continue
+        # Positives = held-out tail of the corruption run only, drawn from the
+        # same sequences as the clean negatives (X_clean_eval). The train-portion
+        # frames — whose clean twins the detectors were fitted on — are excluded.
+        X_test = held_out_eval(X_test, seq_lens=load_phi_seq_lens(run_name))
         if X_test.shape[1] != X_clean.shape[1]:
             # _extract may have fallen back to a different representation for
             # this run; feeding wrong-width features into the fitted

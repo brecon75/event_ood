@@ -13,7 +13,8 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vmem_benchmark import benchmark_config as cfg
 from analysis.vmem_utils import (
-    slice_phi_stat, split_train_eval, load_phi_seq_lens, chunked_apply, device_for,
+    slice_phi_stat, split_train_eval, held_out_eval, load_phi_seq_lens,
+    chunked_apply, device_for, load_pt, materialize_f32,
 )
 from analysis.gpu_fit import empirical_precision
 
@@ -103,16 +104,18 @@ class LazyFeatures(Mapping):
     def _build(self, run):
         if self._verbose:
             print(f"  [load] {run}", flush=True)
+        # mmap + materialize only phi: the sibling phi_spatial (~2 GB/run) that
+        # these representation/detector stages never use is not read off disk.
         feats = {
-            'phi': torch.load(self._phi_files[run], weights_only=True)['phi'].numpy(),
+            'phi': materialize_f32(load_pt(self._phi_files[run])['phi']),
             'ann': {}, 'spike': {},
         }
         if run in self._ann_files:
             feats['ann'] = {k: v.numpy()
-                            for k, v in torch.load(self._ann_files[run], weights_only=True).items()
+                            for k, v in load_pt(self._ann_files[run]).items()
                             if isinstance(v, torch.Tensor)}
         if run in self._spike_files:
-            d = torch.load(self._spike_files[run], weights_only=True)
+            d = load_pt(self._spike_files[run])
             sp = {k: v.numpy() for k, v in d.items() if isinstance(v, torch.Tensor)}
             # Legacy spike files contain NaN entropy where p was exactly 0 or 1;
             # the binary-entropy limit there is 0.
@@ -120,7 +123,7 @@ class LazyFeatures(Mapping):
                 sp["spike_entropy"] = np.nan_to_num(sp["spike_entropy"], nan=0.0)
             feats['spike'] = sp
         if run in self._fused_files:
-            d = torch.load(self._fused_files[run], weights_only=True, map_location="cpu")
+            d = load_pt(self._fused_files[run])
             feats['fused'] = {k: (v.numpy() if isinstance(v, torch.Tensor) else v)
                               for k, v in d.items() if v is not None}
         return feats
@@ -235,6 +238,9 @@ def main():
             if test_feat.shape[1] != train_width:
                 continue   # representation width differs for this run — skip
 
+            # Positives = held-out tail of the run only, matched to the clean
+            # negatives' held-out sequences.
+            test_feat = held_out_eval(test_feat, seq_lens=load_phi_seq_lens(run_name))
             corr_scores = scorer(test_feat)
 
             y_true = np.concatenate([np.zeros(len(clean_scores)), np.ones(len(corr_scores))])

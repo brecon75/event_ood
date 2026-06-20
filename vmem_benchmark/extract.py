@@ -81,6 +81,10 @@ def resolve_defaults_and_args():
     parser.add_argument("--traj-save-n", type=int, help="Override TRAJ_SAVE_N (0 disables trajectory saving)")
     parser.add_argument("--no-ann", action="store_true", help="Skip ANN GAP feature collection/saving (also skips the FPN+head compute)")
     parser.add_argument("--no-spike", action="store_true", help="Skip spike-rate/entropy collection/saving")
+    parser.add_argument("--no-temporal-gap", action="store_true", help="Skip temporal_gap (GAP'd V(t) trajectory) collection/saving")
+    parser.add_argument("--no-temporal-phi", action="store_true", help="Skip temporal_phi (7 handcrafted stats) collection/saving")
+    parser.add_argument("--no-det", action="store_true", help="Skip detection-head forward + det_outputs (saves compute too)")
+    parser.add_argument("--phi-only", action="store_true", help="Extract phi(+phi_spatial) only: implies --no-ann --no-spike --no-temporal-gap --no-temporal-phi --no-det --traj-save-n 0")
     
     
     # We parse known args so it doesn't break if run inside environment frameworks with extra args
@@ -234,6 +238,15 @@ def resolve_defaults_and_args():
         cfg.SAVE_ANN = False
     if args.no_spike:
         cfg.SAVE_SPIKE = False
+    if args.no_temporal_gap:
+        cfg.SAVE_TGAP = False
+    if args.no_temporal_phi:
+        cfg.SAVE_TPHI = False
+    if args.no_det:
+        cfg.SAVE_DET = False
+    if args.phi_only:
+        cfg.SAVE_ANN = cfg.SAVE_SPIKE = cfg.SAVE_TGAP = cfg.SAVE_TPHI = cfg.SAVE_DET = False
+        cfg.TRAJ_SAVE_N = 0
 
 
     # Dynamically inject resolved HybridDetection and event_corruption to sys.path
@@ -480,7 +493,7 @@ def run_benchmark():
 
         tgap_path = cfg.OUTPUT_DIR / "temporal_gap" / f"{run_name}.pt"
         ann_path = cfg.ANN_DIR / f"{run_name}.pt"
-        if phi_path.exists() and tgap_path.exists() and (ann_path.exists() or not cfg.SAVE_ANN):
+        if phi_path.exists() and (tgap_path.exists() or not cfg.SAVE_TGAP) and (ann_path.exists() or not cfg.SAVE_ANN):
             existing = torch.load(phi_path, weights_only=True, map_location="cpu")
             done_seqs_saved = set(existing.get('done_seqs', []))
             del existing
@@ -582,30 +595,32 @@ def run_benchmark():
                         head_cls_L0_gap = cls_output.mean(dim=(2, 3)).cpu()
                         seq_head_cls_L0_gap_cpu.append(head_cls_L0_gap)
 
-                    # Run downstream YOLOX detection head to get predictions (B, anchors, 7)
-                    predictions, _ = module.mdl.forward_detect(backbone_features=backbone_features)
-                    # Extract for batch size 1
-                    obj_conf = predictions[0, :, 4]
-                    cls_conf, _ = predictions[0, :, 5:].max(dim=-1)
-                    scores = obj_conf * cls_conf  # (anchors,)
-                    
-                    # Filter anchors with score > 0.05
-                    mask = scores > 0.05
-                    filtered_pred = predictions[0, mask]  # (K, 7)
-                    
-                    # Sort and keep top 100 anchors
-                    if len(filtered_pred) > 0:
-                        f_scores = scores[mask]
-                        sort_idx = torch.argsort(f_scores, descending=True)
-                        filtered_pred = filtered_pred[sort_idx[:100]]
-                    
-                    # Pad to fixed size (100, 7)
-                    K = len(filtered_pred)
-                    padded_pred = torch.zeros((100, 7), device=predictions.device)
-                    if K > 0:
-                        padded_pred[:K] = filtered_pred
-                        
-                    seq_det_outputs_cpu.append(padded_pred.unsqueeze(0).cpu())
+                    # Run downstream YOLOX detection head (skipped via --no-det,
+                    # which also avoids this forward_detect compute)
+                    if cfg.SAVE_DET:
+                        predictions, _ = module.mdl.forward_detect(backbone_features=backbone_features)
+                        # Extract for batch size 1
+                        obj_conf = predictions[0, :, 4]
+                        cls_conf, _ = predictions[0, :, 5:].max(dim=-1)
+                        scores = obj_conf * cls_conf  # (anchors,)
+
+                        # Filter anchors with score > 0.05
+                        mask = scores > 0.05
+                        filtered_pred = predictions[0, mask]  # (K, 7)
+
+                        # Sort and keep top 100 anchors
+                        if len(filtered_pred) > 0:
+                            f_scores = scores[mask]
+                            sort_idx = torch.argsort(f_scores, descending=True)
+                            filtered_pred = filtered_pred[sort_idx[:100]]
+
+                        # Pad to fixed size (100, 7)
+                        K = len(filtered_pred)
+                        padded_pred = torch.zeros((100, 7), device=predictions.device)
+                        if K > 0:
+                            padded_pred[:K] = filtered_pred
+
+                        seq_det_outputs_cpu.append(padded_pred.unsqueeze(0).cpu())
 
                 # Collect phi for this batch (KEEP ON GPU to prevent blocking sync)
                 phi_batch = monitor.collect_phi()
@@ -617,15 +632,17 @@ def run_benchmark():
                 if phi_spatial_batch.numel() > 0:
                     seq_phi_spatial_gpu.append(phi_spatial_batch)
 
-                # Collect temporal phi online
-                tphi_batch = monitor.collect_temporal_phi()
-                if tphi_batch.numel() > 0:
-                    seq_temporal_phi_cpu.append(tphi_batch)
+                # Collect temporal phi online (skipped via --no-temporal-phi)
+                if cfg.SAVE_TPHI:
+                    tphi_batch = monitor.collect_temporal_phi()
+                    if tphi_batch.numel() > 0:
+                        seq_temporal_phi_cpu.append(tphi_batch)
 
-                # Collect temporal GAP online (breaks 50-sequence bottleneck)
-                tgap_batch = monitor.collect_temporal_gap()
-                if tgap_batch.numel() > 0:
-                    seq_temporal_gap_cpu.append(tgap_batch)
+                # Collect temporal GAP online (skipped via --no-temporal-gap)
+                if cfg.SAVE_TGAP:
+                    tgap_batch = monitor.collect_temporal_gap()
+                    if tgap_batch.numel() > 0:
+                        seq_temporal_gap_cpu.append(tgap_batch)
 
                 # Collect spike stats online (skipped via --no-spike)
                 if cfg.SAVE_SPIKE:
@@ -754,13 +771,13 @@ def run_benchmark():
             traj_final = {l: torch.cat(v, dim=1) for l, v in traj_bank.items()}
             torch.save({'trajs': traj_final, 'run': run_name}, traj_path)
 
-        if _merge_seq_artifact(
+        if cfg.SAVE_TPHI and _merge_seq_artifact(
                 cfg.TEMPORAL_PHI_DIR / f"_tmp_{run_name}",
                 cfg.TEMPORAL_PHI_DIR / f"{run_name}.pt",
                 ["temporal_phi"], run_name, log=overall_pbar.write):
             overall_pbar.write(f"  Saved temporal phi -> {run_name}.pt")
 
-        if _merge_seq_artifact(
+        if cfg.SAVE_TGAP and _merge_seq_artifact(
                 cfg.OUTPUT_DIR / "temporal_gap" / f"_tmp_{run_name}",
                 cfg.OUTPUT_DIR / "temporal_gap" / f"{run_name}.pt",
                 ["temporal_gap"], run_name, log=overall_pbar.write):
@@ -779,7 +796,7 @@ def run_benchmark():
                 ["spike_rate", "spike_entropy"], run_name, log=overall_pbar.write):
             overall_pbar.write(f"  Saved spike stats -> {run_name}.pt")
 
-        if _merge_seq_artifact(
+        if cfg.SAVE_DET and _merge_seq_artifact(
                 cfg.DET_OUT_DIR / f"_tmp_{run_name}",
                 cfg.DET_OUT_DIR / f"{run_name}.pt",
                 ["det"], run_name, log=overall_pbar.write):

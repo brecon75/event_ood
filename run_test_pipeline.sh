@@ -34,5 +34,12 @@ CORRUPTIONS = ["hot_pixel", "event_flood"]
 SEVERITIES = [5]
 EOF
 
+# 2b. Redirect ALL outputs to a clearly-labelled test dir so the smoke run never
+#     overwrites real phi / result CSVs. Every path derives from OUTPUT_DIR,
+#     which honours VMEM_OUTPUT_DIR (see benchmark_config.py).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export VMEM_OUTPUT_DIR="$SCRIPT_DIR/test_outputs"
+echo "--> Test outputs -> $VMEM_OUTPUT_DIR"
+
 # 3. Execute full benchmark forwarding any arguments
 ./run_full_benchmark.sh "$@"

@@ -83,7 +83,25 @@ def to_latex(rows: pd.DataFrame, clean_ap: float, clean_ap50: float) -> str:
     return "\n".join(lines)
 
 
+def _parse_args():
+    import argparse
+    ap = argparse.ArgumentParser(description="Summarize the mAP-degradation experiment.")
+    ap.add_argument("--input", default=str(RAW),
+                    help="raw mAP CSV from validation_corrupt.py "
+                         "(default: results/neftci_map_degradation.csv)")
+    ap.add_argument("--output-dir", default=None,
+                    help="dir for the summary CSV + LaTeX table (default: results/)")
+    return ap.parse_args()
+
+
 def main():
+    global RAW, SUMMARY, TABLE_TEX
+    args = _parse_args()
+    RAW = Path(args.input)
+    if args.output_dir:
+        out = Path(args.output_dir)
+        SUMMARY = out / "neftci_map_degradation_summary.csv"
+        TABLE_TEX = out / "neftci_map_degradation_table.tex"
     df = load()
     rows, clean_ap, clean_ap50 = summarize(df)
     SUMMARY.parent.mkdir(parents=True, exist_ok=True)

@@ -155,11 +155,11 @@ def _extract_ap(metrics: dict) -> dict:
     return {k: flat.get(k, float('nan')) for k in AP_KEYS}
 
 
-def _append_row(row: dict):
-    RESULTS_CSV.parent.mkdir(parents=True, exist_ok=True)
+def _append_row(row: dict, results_csv: Path):
+    results_csv.parent.mkdir(parents=True, exist_ok=True)
     fields = ['corruption', 'severity', *AP_KEYS]
-    write_header = not RESULTS_CSV.exists()
-    with open(RESULTS_CSV, 'a', newline='') as f:
+    write_header = not results_csv.exists()
+    with open(results_csv, 'a', newline='') as f:
         w = csv.DictWriter(f, fieldnames=fields)
         if write_header:
             w.writeheader()
@@ -226,10 +226,14 @@ def main(config: DictConfig):
 
     metrics = results[0] if results else dict(trainer.callback_metrics)
     ap = _extract_ap(metrics)
+    # `output_dir` (Hydra `+output_dir=...`) redirects the results CSV; the test
+    # data folder is the standard `dataset.path`.
+    out_dir = config.get('output_dir', None)
+    results_csv = (Path(out_dir) / 'neftci_map_degradation.csv') if out_dir else RESULTS_CSV
     row = {'corruption': corruption, 'severity': severity, **ap}
-    _append_row(row)
+    _append_row(row, results_csv)
     print(f'[map-degradation] {corruption} sev{severity}: '
-          f"AP={ap['AP']:.4f} AP_50={ap['AP_50']:.4f}  -> {RESULTS_CSV}")
+          f"AP={ap['AP']:.4f} AP_50={ap['AP_50']:.4f}  -> {results_csv}")
 
 
 if __name__ == '__main__':

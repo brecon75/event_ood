@@ -127,7 +127,28 @@ def fig_drop_vs_detectability(rows):
     plt.close(fig); print(f"wrote {GRAPH_DIR/'25_map_drop_vs_detectability.png'}")
 
 
+def _parse_args():
+    import argparse
+    ap = argparse.ArgumentParser(description="Check/visualize detector mAP degradation under corruption.")
+    ap.add_argument("--map-csv", default=str(MAP_CSV),
+                    help="mAP CSV from validation_corrupt.py (default: results/neftci_map_degradation.csv)")
+    ap.add_argument("--output-dir", default=None,
+                    help="dir for the summary CSV and figures 24/25 "
+                         "(default: results/ for the CSV, outputs/graphs/ for the figures)")
+    ap.add_argument("--auroc-csv", default=str(AUROC_CSV),
+                    help="MDD per-severity AUROC CSV for the drop-vs-detectability scatter")
+    return ap.parse_args()
+
+
 def main():
+    global MAP_CSV, SUMMARY, AUROC_CSV, GRAPH_DIR
+    args = _parse_args()
+    MAP_CSV = Path(args.map_csv)
+    AUROC_CSV = Path(args.auroc_csv)
+    if args.output_dir:
+        out = Path(args.output_dir)
+        SUMMARY = out / "neftci_map_degradation_summary.csv"
+        GRAPH_DIR = out
     if not MAP_CSV.exists():
         _how_to_generate(); return
     rows, clean_ap, clean_ap50 = load_map()

@@ -260,6 +260,22 @@ def auroc_vs_clean(scorer, clean_scores, X):
 
 
 def main():
+    # --gen1-root: test-data root (test split = <root>/test). --output-dir: where
+    # free_rider_ablation.csv + the plot go. (parse_known_args so --max-seq/--test
+    # still flow to resolve_max_seq.) Both default to benchmark_config.
+    import argparse
+    _ap = argparse.ArgumentParser(add_help=False)
+    _ap.add_argument("--gen1-root", default=None,
+                     help="Gen1 dataset root; the test split is <root>/test")
+    _ap.add_argument("--output-dir", default=None,
+                     help="dir for free_rider_ablation.csv and the plot (default: outputs/results + outputs/plots)")
+    _a, _ = _ap.parse_known_args()
+    if _a.gen1_root:
+        cfg.GEN1_ROOT = Path(_a.gen1_root)
+    results_out = Path(_a.output_dir) if _a.output_dir else (cfg.OUTPUT_DIR / "results")
+    if _a.output_dir:
+        cfg.PLOT_DIR = Path(_a.output_dir)
+
     max_seq = resolve_max_seq()
     # Control ablation: max severity only (clearest Trained/Random/Raw gap).
     # Use list(cfg.SEVERITIES) here to sweep all severities instead.
@@ -393,7 +409,7 @@ def main():
             for cond in results:
                 rows.append({"condition": cond, "corruption": c, "severity": sev,
                              "auroc": results[cond].get(rn, float("nan"))})
-        out_dir = cfg.OUTPUT_DIR / "results"
+        out_dir = results_out
         out_dir.mkdir(parents=True, exist_ok=True)
         pd.DataFrame(rows).to_csv(out_dir / "free_rider_ablation.csv", index=False)
         print(f"  Saved {out_dir / 'free_rider_ablation.csv'}")

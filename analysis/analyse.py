@@ -1,17 +1,35 @@
-import sys
+import sys, os
 from pathlib import Path
-import torch
 
 # Fix paths for imports
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent))
+
+# When run directly, resolve --output-dir / --gen1-root BEFORE importing
+# benchmark_config so every derived path honors them: phi is read from
+# <output-dir>/phi and plots+tables are written under <output-dir>. Guarded to
+# __main__ so importing this module (e.g. by run_phi_stages) is side-effect free.
+if __name__ == "__main__":
+    import argparse
+    _ap = argparse.ArgumentParser(add_help=True, description="Run the full phi-analysis suite.")
+    _ap.add_argument("--output-dir", default=None,
+                     help="output root: reads phi from <dir>/phi, writes plots+tables under <dir>")
+    _ap.add_argument("--gen1-root", default=None,
+                     help="Gen1 dataset root (accepted for uniformity; analysis runs on extracted phi)")
+    _a, _ = _ap.parse_known_args()
+    if _a.output_dir:
+        os.environ["VMEM_OUTPUT_DIR"] = _a.output_dir
+    if _a.gen1_root:
+        os.environ["VMEM_GEN1_ROOT"] = _a.gen1_root
+
+import torch
 from vmem_benchmark import benchmark_config as cfg
 
 # Import components
 from analysis.vmem_utils import LazyPhiDict, TABLE_DIR
 from analysis.analyse_plots import (
     plot_sensitivity_heatmap, plot_auroc_vs_severity,
-    plot_all_trajectories, plot_pca_subspaces
+    plot_all_trajectories, plot_pca_subspaces, plot_per_layer_distributions
 )
 from analysis.analyse_comparisons import (
     run_per_layer_auroc_table, run_statwise_ablation,
@@ -52,6 +70,7 @@ def main():
     # ── Level 1: original plots ──────────────────────────────────────────────
     plot_sensitivity_heatmap(all_phi)
     plot_auroc_vs_severity(all_phi)
+    plot_per_layer_distributions(all_phi)
     plot_all_trajectories()
 
     # ── Level 2: per-layer + stat-wise ──────────────────────────────────────

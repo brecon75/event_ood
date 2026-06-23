@@ -39,6 +39,8 @@ USE_TEST_SET="${USE_TEST_SET:-true}"
 CHECKPOINT_STRICT="${CHECKPOINT_STRICT:-false}"
 CORRUPTIONS="${CORRUPTIONS:-hot_pixel event_flood temporal_jitter event_rate_shift polarity_flip spatial_dropout}"
 SEVERITIES="${SEVERITIES:-1 2 3 4 5}"
+# Output dir for the results CSV (empty => validation_corrupt default <repo>/results).
+OUTPUT_DIR="${OUTPUT_DIR:-}"
 
 CHECKPOINT_HYDRA="$(printf '%s' "$CHECKPOINT" | sed 's/=/\\=/g')"
 
@@ -56,6 +58,9 @@ run_one() {
     "hardware.num_workers.eval=${EVAL_WORKERS}" \
     "+corruption=${corruption}" \
     "+severity=${severity}"
+  if [ -n "${OUTPUT_DIR}" ]; then
+    set -- "$@" "+output_dir=${OUTPUT_DIR}"
+  fi
   if [ "${SMOKE:-0}" = "1" ]; then
     if [ "${USE_TEST_SET}" = "true" ]; then
       set -- "$@" "+limit_test_batches=4"

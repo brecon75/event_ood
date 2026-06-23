@@ -1174,18 +1174,44 @@ residuals that stay flat at every window (Table~\ref{tab:window}, Figure~\ref{fi
 \section{Representation Ablation}
 \label{app:repr}
 \emph{Is the sub-threshold membrane the right signal?} \texttt{representation\_ablation.py} scores
-membrane $\varphi$ (\texttt{full\_membrane}) and its $\mu/\sigma^2/\kappa$ and per-layer slices
-(L4 carries jitter); \textbf{spike-rate} / \textbf{spike-entropy}; \textbf{ANN feature}
-(\texttt{last\_ann\_gap}) and \textbf{logits} (\texttt{head\_cls\_L0\_gap}); and \textbf{fused}
-(concat + LogReg). Pilot findings (Mahalanobis): $\sigma^2$ alone is the strongest single moment;
-$\mu$ alone is best for \texttt{event\_flood} (the only corruption that shifts the global mean);
-$\kappa$ is weakest overall but uniquely informative on \texttt{temporal\_jitter}; the combined
-$[\mu,\sigma^2,\kappa]$ beats every single moment on average. Across detectors on static $\varphi$
-(avg over $6{\times}5$), the MLP autoencoder leads (AUROC $0.673$, FPR@95 $0.695$), ahead of RealNVP
-($0.650$), PCA-Mahalanobis ($0.650$), Mahalanobis ($0.638$), $k$NN ($0.637$), GMM ($0.617$), OCSVM
-($0.598$) -- the AE win indicates a non-Gaussian, non-linear $\varphi$ manifold that parametric
-detectors underfit. \emph{(Provisional pilot numbers; full-grid table pending.)} \todofig{Insert the
-full representation $\times$ corruption AUROC table from \texttt{representation\_ablation.py}.}
+a one-sided Mahalanobis on membrane $\varphi$ (\texttt{full\_membrane}), each moment slice
+($\mu,\sigma^2,\kappa$), spike-rate, spike-entropy, ANN penultimate features, and logits
+(Figure~\ref{fig:repr}, L5; \texttt{representation\_metrics.csv}). The pattern confirms the theory:
+\texttt{hot\_pixel} is caught by \emph{every} representation ($\approx1.0$); \texttt{temporal\_jitter}
+is carried by the higher moments ($\kappa$ $0.76$, $\sigma^2$ $0.73$, full $\varphi$ $0.70$) and is
+\emph{invisible} to the mean ($\mu$ $0.39$) and to spike-rate ($0.39$) -- timing lives in
+variance/kurtosis, not the first moment; \texttt{event\_rate\_shift} is best seen on the input-side
+representations (logits $0.74$, ANN $0.66$, spike-entropy $0.59$). Crucially, the \textbf{ANN
+features are the \emph{worst} representation} (mean $0.46$), collapsing on the contractions and
+polarity ($0.25$--$0.31$): the membrane is not just cheaper than the ANN signal, it is more
+\emph{informative} for these shifts. The contraction columns sit near or below $0.5$ for all
+representations under one-sided scoring -- the inversion the MDD's two-sided branches address.
+
+Across the seven classical detectors on static $\varphi$ (mean over $6{\times}5$;
+\texttt{ood\_metrics.csv}, Figure~\ref{fig:detcmp}), PCA-Mahalanobis leads ($0.567$), followed by
+Mahalanobis ($0.563$), GMM ($0.551$), MLP-AE ($0.545$), RealNVP ($0.542$); OCSVM ($0.484$) and
+$k$NN ($0.473$) fall \emph{below} chance because a one-sided density score inverts on the
+contraction corruptions. The means cluster near $0.5$ precisely because no \emph{single}-sided
+detector can handle both dilations and contractions -- the motivation for MDD.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.82\linewidth]{26_representation_ablation.png}
+  \caption{\textbf{Membrane representation ablation} (Mahalanobis AUROC, L5). $\sigma^2/\kappa$
+  carry \texttt{temporal\_jitter} while $\mu$/spike-rate do not; ANN features are the weakest
+  overall and collapse on contractions/polarity. Source: \texttt{plot\_appendix\_graphs.py}.}
+  \label{fig:repr}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.72\linewidth]{27_detector_comparison.png}
+  \caption{\textbf{Seven classical OOD detectors on static $\varphi$}, mean AUROC over all
+  corruptions/severities. PCA-Mahalanobis/Mahalanobis lead; $k$NN/OCSVM invert below chance on the
+  contractions -- one-sided detectors cannot face both ways, motivating MDD. Source:
+  \texttt{plot\_appendix\_graphs.py} (\texttt{ood\_metrics.csv}).}
+  \label{fig:detcmp}
+\end{figure}
 
 \section{Severity Monotonicity, Cross-Corruption, and What \texorpdfstring{$\varphi$}{phi} Encodes}
 \label{app:severity}

@@ -18,9 +18,10 @@ from pathlib import Path
 import pandas as pd
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-RAW = REPO_ROOT / "results" / "neftci_map_degradation.csv"
-SUMMARY = REPO_ROOT / "results" / "neftci_map_degradation_summary.csv"
-TABLE_TEX = REPO_ROOT / "results" / "neftci_map_degradation_table.tex"
+_RES = REPO_ROOT / "vmem_benchmark" / "outputs" / "results"
+RAW = _RES / "neftci_map_degradation.csv"
+SUMMARY = _RES / "neftci_map_degradation_summary.csv"
+TABLE_TEX = _RES / "neftci_map_degradation_table.tex"
 
 CORRUPTION_ORDER = [
     "hot_pixel", "event_flood", "temporal_jitter",

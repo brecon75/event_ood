@@ -25,9 +25,10 @@ import pandas as pd
 
 _HERE = Path(__file__).resolve().parent
 REPO = _HERE.parent
-MAP_CSV = REPO / "results" / "neftci_map_degradation.csv"
-SUMMARY = REPO / "results" / "neftci_map_degradation_summary.csv"
-AUROC_CSV = REPO / "vmem_benchmark" / "outputs" / "results" / "final_results.csv"
+_RES = REPO / "vmem_benchmark" / "outputs" / "results"
+MAP_CSV = _RES / "neftci_map_degradation.csv"
+SUMMARY = _RES / "neftci_map_degradation_summary.csv"
+AUROC_CSV = _RES / "final_results.csv"
 GRAPH_DIR = REPO / "vmem_benchmark" / "outputs" / "graphs"
 
 CORRS = ["hot_pixel", "event_flood", "temporal_jitter",

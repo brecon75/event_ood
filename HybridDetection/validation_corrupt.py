@@ -64,7 +64,7 @@ REPO_ROOT = _HERE.parent
 sys.path.insert(0, str(REPO_ROOT / "event_corruption"))
 from corrupt.registry import apply_corruption, CORRUPTIONS, SEVERITIES  # noqa: E402
 
-RESULTS_CSV = REPO_ROOT / "results" / "neftci_map_degradation.csv"
+RESULTS_CSV = REPO_ROOT / "vmem_benchmark" / "outputs" / "results" / "neftci_map_degradation.csv"
 # The Prophesee evaluator (utils/.../coco_eval.py) returns these keys; they are
 # logged with a 'test/' or 'val/' prefix by run_psee_evaluator.
 AP_KEYS = ('AP', 'AP_50', 'AP_75', 'AP_S', 'AP_M', 'AP_L')

@@ -47,6 +47,79 @@ def plot_sensitivity_heatmap(all_phi):
     print("  Saved sensitivity_heatmap.pdf")
 
 
+def plot_per_layer_distributions(all_phi, severity=None, max_frames=20000):
+    """Qualitative per-layer statistical distributions of the membrane moments,
+    clean vs each corruption.
+
+    For every corruption present, draws a 4x3 grid (PLIF layer x moment
+    [mu, sigma^2, kurtosis]); each panel overlays the clean distribution against
+    the corrupted one at `severity` (default = the highest available). This is
+    the qualitative companion to the quantitative AUROC tables: it shows *how*
+    the per-layer spike/membrane statistics shift under each corruption.
+
+    Uses only the `phi` arrays already in `all_phi` (no GPU / re-extraction).
+    """
+    present = _get_present(all_phi)
+    if not present:
+        print("  No corrupted runs found, skipping per-layer distributions.")
+        return
+    sev = severity if severity is not None else max(cfg.SEVERITIES)
+    moments = [("mu", "phi_start", "mu_end"),
+               ("sigma^2", "mu_end", "var_end"),
+               ("kurtosis", "var_end", "phi_end")]
+
+    def _slice(run, lo_key, hi_key, spec):
+        arr = np.asarray(all_phi[run])
+        if arr.shape[0] > max_frames:  # cap frames for a tractable histogram
+            idx = np.random.default_rng(0).choice(arr.shape[0], max_frames, replace=False)
+            arr = arr[idx]
+        return arr[:, spec[lo_key]:spec[hi_key]].ravel()
+
+    clean_avail = "clean" in all_phi
+    if not clean_avail:
+        print("  No clean run, skipping per-layer distributions.")
+        return
+
+    print("Plotting per-layer moment distributions (clean vs corruption)...")
+    for c in present:
+        run = f"{c}_L{sev}"
+        if run not in all_phi:
+            # fall back to the highest severity that exists for this corruption
+            avail = [s for s in cfg.SEVERITIES if f"{c}_L{s}" in all_phi]
+            if not avail:
+                continue
+            run = f"{c}_L{max(avail)}"
+        fig, axes = plt.subplots(len(LAYER_SPECS), len(moments),
+                                 figsize=(4 * len(moments), 3 * len(LAYER_SPECS)))
+        axes = np.atleast_2d(axes)
+        for li, spec in enumerate(LAYER_SPECS):
+            for mi, (mname, lo, hi) in enumerate(moments):
+                ax = axes[li, mi]
+                clean_v = _slice("clean", lo, hi, spec)
+                corr_v = _slice(run, lo, hi, spec)
+                lo_e = np.percentile(np.concatenate([clean_v, corr_v]), 0.5)
+                hi_e = np.percentile(np.concatenate([clean_v, corr_v]), 99.5)
+                bins = np.linspace(lo_e, hi_e, 80)
+                ax.hist(clean_v, bins=bins, density=True, alpha=0.55,
+                        color="0.4", label="clean")
+                ax.hist(corr_v, bins=bins, density=True, alpha=0.55,
+                        color="tab:red", label=run)
+                if mi == 0:
+                    ax.set_ylabel(f"{spec['name']}\ndensity", fontsize=8)
+                if li == 0:
+                    ax.set_title(mname)
+                if li == 0 and mi == len(moments) - 1:
+                    ax.legend(fontsize=7)
+                ax.tick_params(labelsize=7)
+        fig.suptitle(f"Per-layer membrane-moment distributions: clean vs {run}",
+                     fontsize=11)
+        plt.tight_layout(rect=[0, 0, 1, 0.98])
+        out = cfg.PLOT_DIR / f"per_layer_dist_{c}_L{sev}.pdf"
+        plt.savefig(out)
+        plt.close()
+        print(f"  Saved {out.name}")
+
+
 def plot_all_trajectories(n_samples=8):
     import gc
     traj_clean = cfg.TRAJ_DIR / "clean.pt"

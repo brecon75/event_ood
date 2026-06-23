@@ -49,29 +49,33 @@ echo "Stage 7: Evaluating fitted OOD detectors on all corrupted runs..."
 if [ "$CUDA_AVAILABLE" = true ]; then echo -e "  --> Running evaluate_detectors.py (AE evaluation) on GPU (CUDA)..."; fi
 $PYTHON analysis/evaluate_detectors.py
 
-echo "Stage 8: Running representation ablation (Mahalanobis comparison)..."
+echo "Stage 8: Evaluating MDD (per-frame + per-sequence, all branches)..."
+if [ "$CUDA_AVAILABLE" = true ]; then echo -e "  --> Running evaluate_mdd.py on GPU (CUDA)..."; fi
+$PYTHON analysis/evaluate_mdd.py
+
+echo "Stage 9: Running representation ablation (Mahalanobis comparison)..."
 $PYTHON analysis/representation_ablation.py
 
-echo "Stage 9: Running severity monotonicity analysis (Spearman rho)..."
+echo "Stage 10: Running severity monotonicity analysis (Spearman rho)..."
 $PYTHON analysis/severity.py
 
-echo "Stage 10: Running downstream task reliability prediction..."
+echo "Stage 11: Running downstream task reliability prediction..."
 $PYTHON analysis/reliability.py
 
-echo "Stage 11: Running cross-corruption zero-shot generalization..."
+echo "Stage 12: Running cross-corruption zero-shot generalization..."
 $PYTHON analysis/cross_corruption.py
 
-echo "Stage 12: Running Free Rider validity ablation..."
+echo "Stage 13: Running Free Rider validity ablation..."
 if [ "$CUDA_AVAILABLE" = true ]; then echo -e "  --> Running free_rider_ablation.py on GPU (CUDA)..."; fi
 $PYTHON analysis/free_rider_ablation.py
 
-echo "Stage 13: Running analysis and main plotting script..."
+echo "Stage 14: Running analysis and main plotting script..."
 $PYTHON analysis/analyse.py
 
-echo "Stage 14: Building final paper LaTeX tables..."
+echo "Stage 15: Building final paper LaTeX tables..."
 $PYTHON reporting/build_paper_tables.py
 
-echo "Stage 15: Building final paper figures..."
+echo "Stage 16: Building final paper figures..."
 $PYTHON reporting/build_paper_figures.py
 
 echo "======================================================================="

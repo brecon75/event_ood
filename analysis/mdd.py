@@ -1,8 +1,9 @@
 """Manifold-Decomposition Detector (MDD).
 
 A single unsupervised OOD detector that scores each frame on orthogonal axes of
-the clean static-phi manifold and fuses them with a calibrated max. Built from
-the diagnosis that event-camera corruptions split into geometry classes:
+the clean static-phi manifold and fuses them with a studentized max
+(max - alpha*median). Built from the diagnosis that event-camera corruptions
+split into geometry classes:
 
   * DILATIONS (hot_pixel, event_rate_shift, temporal_jitter) push phi OUTWARD —
     caught by distance from the clean mean.
@@ -12,7 +13,10 @@ the diagnosis that event-camera corruptions split into geometry classes:
   * INVISIBLE (polarity_flip) — no signature in V_mem; out of scope.
 
 Branches (each standardized on held-out clean, so a plain max is a true OR):
-  B1 radius  : | ||z|| - E||z|| | / sd          two-sided membrane energy
+  B1 radius  : max( | ||z|| - E||z|| | / sd ,  emp_maha )   two-sided membrane
+               energy OR'd with an empirical (UNSHRUNK) covariance Mahalanobis in
+               PCA-k -- the latter catches the covariance ROTATION polarity_flip
+               induces that Ledoit-Wolf shrinkage washes out (toggle: use_emp_radius)
   B2 RCF     : | ||z|| - E[||z|| | dir] | / sd   two-sided, conditioned on
                direction via cosine-kNN -> the contraction detector
   B3 L4 d^2  : Ledoit-Wolf Mahalanobis on the layer-4 block (deep timing signal
@@ -20,6 +24,31 @@ Branches (each standardized on held-out clean, so a plain max is a true OR):
   B4 spatial : (optional, only when phi_spatial is available) Ledoit-Wolf
                Mahalanobis on the spatial-dispersion features GAP discards ->
                the per-frame detector for spatial_dropout / event_flood
+
+IMPROVEMENTS (validated 2026-06-23, NOW WIRED IN below; default on, each toggleable;
+full writeup + experiment timeline in Docs/mdd_improvements.md). Two changes target
+the residual corruptions without adding a branch or re-extracting:
+  (A) radius' = max(radius, emp_maha)  -- fold an empirical (UNSHRUNK) covariance
+      Mahalanobis in PCA-k INTO the radius branch; it catches the covariance
+      rotation a polarity_flip induces that Ledoit-Wolf shrinkage washes out.
+      Disable with MDD(use_emp_radius=False).
+  (B) fused = max(branches) - alpha*median(branches)  (alpha=0.5) -- studentized max
+      instead of the plain max, which sat BELOW the best single branch by inflating
+      the clean floor. MDD(fusion_alpha=0.0) restores the plain max.
+
+Result difference (per-sequence AUROC, L5; baseline max -> improved alpha=0.5):
+  corruption          baseline  improved
+  hot_pixel             1.000     1.000
+  event_rate_shift      0.952     0.956
+  temporal_jitter       0.947     0.952
+  event_flood           1.000     1.000
+  polarity_flip         0.609     0.607  (0.620 at alpha=0 with radius')
+  spatial_dropout       0.560     0.613  (up to 0.689 at alpha=1.25)
+  --- worst-corruption floor  0.560 -> 0.607 ; mean 0.845 -> 0.855 ---
+The two residuals stay below the 0.8 "solved" bar: spatial_dropout (contraction) is
+capped ~0.69 and polarity_flip (model is polarity-symmetric by design) ~0.66 -- the
+phi information ceiling; alpha trades polarity vs dropout (one static combiner can't
+maximize both).
 
 See Docs/novel.md for the full derivation and the validated numbers.
 """
@@ -61,7 +90,8 @@ def _maha_d2(x, mu, P):
 
 
 class MDD:
-    def __init__(self, k_pca=64, k_nn=64, n_ref=15000, use_spatial=True):
+    def __init__(self, k_pca=64, k_nn=64, n_ref=15000, use_spatial=True,
+                 use_emp_radius=True, fusion_alpha=0.5):
         self.k_pca = k_pca
         self.k_nn = k_nn
         # n_ref is IGNORED outside --fast: the RCF reference uses the FULL clean
@@ -71,6 +101,11 @@ class MDD:
         # the reference for --fast smoke tests.
         self.n_ref = n_ref
         self.use_spatial = use_spatial
+        # (A) fold an empirical-covariance PCA Mahalanobis into the radius branch;
+        # (B) studentized fusion (max - fusion_alpha*median). See module docstring
+        # / Docs/mdd_improvements.md. fusion_alpha=0 -> plain max (legacy).
+        self.use_emp_radius = use_emp_radius
+        self.fusion_alpha = float(fusion_alpha)
         self._fitted = False
 
     # ------------------------------------------------------------------ fit
@@ -100,6 +135,18 @@ class MDD:
         rfit = np.linalg.norm(Zfit, axis=1) + 1e-9
         self.rg_mu = float(rfit.mean())
         self.rg_sd = float(rfit.std() + 1e-9)
+
+        # (A) empirical (UNSHRUNK) covariance Mahalanobis in PCA space, folded into
+        # the radius branch (radius' = max(isotropic radius, emp_maha)). It catches
+        # the covariance ROTATION polarity_flip induces, which Ledoit-Wolf shrinkage
+        # washes out. Pre-standardized on the calib split so the max() in
+        # _branches_raw combines two comparable scales before the final calibration.
+        if self.use_emp_radius:
+            self.emp_mu = Zfit.mean(0).astype(np.float32)
+            self.emp_P = np.linalg.pinv(np.cov(Zfit.T)).astype(np.float32)
+            emp_cal = _maha_d2(self._project(phi_calib), self.emp_mu, self.emp_P)
+            self.emp_cal_m = float(np.mean(emp_cal))
+            self.emp_cal_s = float(np.std(emp_cal) + 1e-9)
 
         # RCF reference (directions + radii on the FULL clean set; _subsample is
         # a no-op outside --fast, so self.n_ref does not cap the reference here).
@@ -162,8 +209,14 @@ class MDD:
         phi = np.asarray(phi, dtype=np.float32)
         Z = self._project(phi)
         r = np.linalg.norm(Z, axis=1)
+        radius = np.abs(r - self.rg_mu) / self.rg_sd
+        if getattr(self, "use_emp_radius", False):
+            # OR the isotropic energy with the (pre-standardized) empirical-cov
+            # Mahalanobis so the radius branch also fires on covariance rotations.
+            emp = (_maha_d2(Z, self.emp_mu, self.emp_P) - self.emp_cal_m) / self.emp_cal_s
+            radius = np.maximum(radius, emp)
         out = {
-            "radius": np.abs(r - self.rg_mu) / self.rg_sd,
+            "radius": radius,
             "rcf": self._rcf(Z),
             "l4": _maha_d2(phi[:, self.l4_cols], self.l4_mu, self.l4_P),
         }
@@ -183,12 +236,20 @@ class MDD:
 
     # ---------------------------------------------------------------- scoring
     def score_branches(self, phi, phi_spatial=None):
-        """Per-branch CALIBRATED scores plus the fused max. Returns a dict."""
+        """Per-branch CALIBRATED scores plus the fused score. Returns a dict.
+
+        Fusion is the STUDENTIZED max (max - fusion_alpha*median): subtracting a
+        robust noise-floor estimate suppresses the clean-floor inflation that made
+        the plain max sit below the best single branch. fusion_alpha=0 -> plain max.
+        """
         if not self._fitted:
             raise RuntimeError("MDD.score_branches called before fit().")
         B = self._branches_raw(phi, phi_spatial)
         cal = {k: (v - self.cal_mean[k]) / self.cal_std[k] for k, v in B.items()}
-        cal["fused"] = np.max(np.stack([cal[k] for k in B], axis=1), axis=1)
+        stack = np.stack([cal[k] for k in B], axis=1)
+        mx = np.max(stack, axis=1)
+        a = getattr(self, "fusion_alpha", 0.0)
+        cal["fused"] = mx - a * np.median(stack, axis=1) if a else mx
         return cal
 
     def score(self, phi, phi_spatial=None):

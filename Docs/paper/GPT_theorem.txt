@@ -1,0 +1,1649 @@
+
+Get responses tailored to you
+
+Log in to get answers based on saved chats, plus create images and upload files.
+
+
+Log in
+This is a copy of a shared ChatGPT conversation
+
+Report conversation
+Uploaded a file
+Uploaded a file
+Uploaded a file
+Uploaded a file
+Assume you're a top machine learning researcher who frequently publishes in Neurips, ICLR, ICML et cetera venues. Now I have an idea of SNN based OOD detection, which is in the uploaded PDF iit_snn_....pdf file.
+
+I also have the trained model weights and the training code for the Other uploaded paper Neftci_Efficient_Event-Based_Object_Detection_A_Hybrid_Neural_Network_with_Spatial_CVPR_2025_paper.pdf
+
+I want to implement he roadmap showed in uploaded PDF iit_snn_....pdf file on the train model weights of uploaded Neftci_Efficient_Event-Based_Object_Detection_A_Hybrid_Neural_Network_with_Spatial_CVPR_2025_paper.pdf. and run the experiments on google colab, please check if the uploaded notebook will do the job, else edit it for uploading the neftci paper's model weights.
+
+Also, in terms of paper roadmap, i got some feedback, uploaded as docx file. But it seems the novelty is not enough for a neurips/iclr paper. I need the following fixes:
+
+## Honest Novelty Assessment (as a top-venue reviewer would see it)
+
+**Short verdict: Borderline for NeurIPS/ICLR main track. Strong for ECCV/ICCV/BMVC or NeurIPS workshops.**
+
+Here's exactly why:
+
+| Contribution | Novelty | Reviewer Objection | Fix |
+|---|---|---|---|
+| EventCorrupt-C benchmark | ✅ Genuine — first for event cameras | "Just ImageNet-C adapted" | Add real sensor noise characterization from hardware specs |
+| MP-OOD (Mahalanobis on membrane potential) | ⚠️ Incremental — Mahalanobis OOD is from Lee et al. NeurIPS 2018 | "The method is 2018, only the signal source is new" | Add a learned density estimator (normalizing flow) on membrane trajectories, or prove theoretically why membrane potentials are OOD-informative |
+| GEN1→DSEC transfer | ✅ Genuine — no prior work does this zero-shot | Solid | Keep as-is |
+| Degradation profiling | ✅ First characterization for SNN detectors | Descriptive only | Add SNN-vs-ANN comparison (RVT) to show SNNs degrade *differently* |
+
+**The single biggest gap:** there's no reason given *why* membrane potentials are OOD-informative beyond intuition. A reviewer will ask for either theory or a strong ablation proving membrane potential beats all ANN-based internal representations.
+
+
+### 1. Is it novel enough for a top paper?
+
+**Honest answer: not yet, as proposed.** Here's the specific gap:
+
+The MP-OOD method is Mahalanobis distance (Lee et al. NeurIPS 2018) applied to a different signal. A reviewer at NeurIPS/ICLR will write exactly: *"The contribution reduces to applying a 2018 method to a new feature type."* The two things that **would** push it to top-venue level:
+
+- **Theoretical result**: prove that membrane potential variance increases monotonically with covariate shift severity (even a simple bound using the LIF dynamics would suffice)
+- **Actionable output**: don't just detect OOD — show the OOD score can trigger adaptive thresholding on the detection head to recover mAP, closing the loop. That turns a detection paper into a reliability paper.
+
+Can you prove a detailed theory and suggest additional ablations that can strengthen the paper roadmap?
+
+Thought for 2m 17s
+I checked the uploaded roadmap, Neftci CVPR paper, feedback doc, and notebook. My verdict:
+
+The idea is feasible on the Neftci hybrid SNN-ANN detector, but the uploaded notebook was not yet enough for real experiments. It had the right MP-OOD/EventCorrupt-C structure, but it used a fallback skeleton model, not the exact Neftci training-code model class. Therefore, a real .pth/.pt/.ckpt state_dict would not load correctly unless the exact model class from your training code is imported. I edited the notebook to add a Colab upload cell for model weights/training-code zip, a safer checkpoint loader, and a clearer warning that the skeleton is only for pipeline validation.
+
+Download the fixed notebook here: EventSNN_OOD_colab_neftci_FIXED.ipynb
+
+The Neftci model is a good target because the paper’s model uses event tensors of shape 
+T
+×
+2
+×
+H
+×
+W
+T×2×H×W, convolutional SNN blocks with PLIF neurons, an ASAB bridge, ANN blocks, and a detection head; this matches the membrane-potential extraction roadmap much better than a pure transformer-style SNN would. 
+
+ Your feedback document also correctly notes that SpikingJelly PLIF modules expose the membrane potential state and that the main adaptation is to hook the 4 convolutional SNN blocks rather than an HsVT-style module. 
+
+
+Theory that makes MP-OOD less “just Mahalanobis”
+The top-venue version should not claim only: “we apply Mahalanobis to membrane potential.” Instead, frame the method as:
+
+Membrane potential trajectories are sufficient statistics for event-stream covariate shift in LIF/PLIF feature extractors under mild assumptions, while spike counts are lossy thresholded projections.
+
+Consider one layer of a PLIF/LIF SNN. A simplified vector update is
+
+u
+t
+=
+λ
+u
+t
+−
+1
++
+z
+t
+−
+θ
+s
+t
+−
+1
+,
+u 
+t
+​
+ =λu 
+t−1
+​
+ +z 
+t
+​
+ −θs 
+t−1
+​
+ ,
+where 
+u
+t
+u 
+t
+​
+  is membrane potential, 
+z
+t
+z 
+t
+​
+  is the input current induced by event features, 
+s
+t
+=
+1
+{
+u
+t
+≥
+θ
+}
+s 
+t
+​
+ =1{u 
+t
+​
+ ≥θ}, 
+λ
+∈
+(
+0
+,
+1
+)
+λ∈(0,1), and 
+θ
+θ is the threshold. This is consistent with your proposal’s LIF formulation and the Neftci PLIF dynamics. 
+
+
+Let corruption severity be 
+γ
+≥
+0
+γ≥0, and suppose the corrupted event stream changes the layer input current as
+
+z
+t
+(
+γ
+)
+=
+z
+t
+(
+0
+)
++
+γ
+Δ
+t
++
+ϵ
+t
+(
+γ
+)
+.
+z 
+t
+(γ)
+​
+ =z 
+t
+(0)
+​
+ +γΔ 
+t
+​
+ +ϵ 
+t
+(γ)
+​
+ .
+Define the membrane deviation
+
+δ
+u
+t
+(
+γ
+)
+=
+u
+t
+(
+γ
+)
+−
+u
+t
+(
+0
+)
+.
+δu 
+t
+(γ)
+​
+ =u 
+t
+(γ)
+​
+ −u 
+t
+(0)
+​
+ .
+If the corruption is in a local regime where the spike path does not change too much, or if we analyze subthreshold dynamics before the reset discontinuity dominates, then
+
+δ
+u
+t
+(
+γ
+)
+=
+λ
+δ
+u
+t
+−
+1
+(
+γ
+)
++
+γ
+Δ
+t
++
+ϵ
+t
+(
+γ
+)
+.
+δu 
+t
+(γ)
+​
+ =λδu 
+t−1
+(γ)
+​
+ +γΔ 
+t
+​
+ +ϵ 
+t
+(γ)
+​
+ .
+Unrolling gives
+
+δ
+u
+t
+(
+γ
+)
+=
+γ
+∑
+k
+=
+1
+t
+λ
+t
+−
+k
+Δ
+k
++
+∑
+k
+=
+1
+t
+λ
+t
+−
+k
+ϵ
+k
+(
+γ
+)
+.
+δu 
+t
+(γ)
+​
+ =γ 
+k=1
+∑
+t
+​
+ λ 
+t−k
+ Δ 
+k
+​
+ + 
+k=1
+∑
+t
+​
+ λ 
+t−k
+ ϵ 
+k
+(γ)
+​
+ .
+So the expected membrane-potential shift is
+
+E
+[
+δ
+u
+t
+(
+γ
+)
+]
+=
+γ
+∑
+k
+=
+1
+t
+λ
+t
+−
+k
+E
+[
+Δ
+k
+]
+.
+E[δu 
+t
+(γ)
+​
+ ]=γ 
+k=1
+∑
+t
+​
+ λ 
+t−k
+ E[Δ 
+k
+​
+ ].
+This gives the key theorem:
+
+Theorem 1 — Monotone membrane drift under event-stream covariate shift.
+Assume a corruption family induces an input-current drift 
+E
+[
+Δ
+k
+]
+≠
+0
+E[Δ 
+k
+​
+ ]
+
+=0 in at least one monitored SNN layer, and the reset mismatch is bounded. Then the temporal mean of the membrane trajectory shifts at least linearly with severity 
+γ
+γ, up to a bounded reset-error term. Therefore, the membrane feature mean is OOD-informative.
+
+For variance-sensitive corruptions such as event flood, temporal jitter, and hot pixels, assume
+
+Cov
+⁡
+(
+z
+t
+(
+γ
+)
+)
+=
+Σ
+0
++
+γ
+Σ
+Δ
+,
+Σ
+Δ
+⪰
+0.
+Cov(z 
+t
+(γ)
+​
+ )=Σ 
+0
+​
+ +γΣ 
+Δ
+​
+ ,Σ 
+Δ
+​
+ ⪰0.
+For the stable linearized LIF recurrence, the stationary membrane covariance satisfies approximately
+
+Σ
+u
+(
+γ
+)
+=
+Σ
+0
++
+γ
+Σ
+Δ
+1
+−
+λ
+2
+.
+Σ 
+u
+(γ)
+​
+ = 
+1−λ 
+2
+ 
+Σ 
+0
+​
+ +γΣ 
+Δ
+​
+ 
+​
+ .
+Therefore,
+
+d
+d
+γ
+tr
+⁡
+(
+Σ
+u
+(
+γ
+)
+)
+=
+tr
+⁡
+(
+Σ
+Δ
+)
+1
+−
+λ
+2
+≥
+0.
+dγ
+d
+​
+ tr(Σ 
+u
+(γ)
+​
+ )= 
+1−λ 
+2
+ 
+tr(Σ 
+Δ
+​
+ )
+​
+ ≥0.
+Theorem 2 — Monotone membrane variance under noise-type event corruptions.
+For stable LIF/PLIF dynamics, any corruption that increases the positive semidefinite input-current covariance produces a monotone increase in membrane-potential variance. This directly justifies using temporal variance, kurtosis, and trajectory-density scores, not only the temporal mean.
+
+Now let the MP-OOD feature be
+
+ϕ
+(
+x
+)
+=
+[
+μ
+u
+,
+σ
+u
+2
+,
+κ
+u
+]
+,
+ϕ(x)=[μ 
+u
+​
+ ,σ 
+u
+2
+​
+ ,κ 
+u
+​
+ ],
+as in your proposal, and let the in-distribution calibration distribution have mean 
+m
+0
+m 
+0
+​
+  and covariance 
+C
+0
+C 
+0
+​
+ . Suppose under severity 
+γ
+γ,
+
+E
+[
+ϕ
+γ
+]
+=
+m
+0
++
+γ
+b
+,
+Cov
+⁡
+(
+ϕ
+γ
+)
+=
+C
+0
++
+γ
+C
+Δ
+,
+C
+Δ
+⪰
+0.
+E[ϕ 
+γ
+​
+ ]=m 
+0
+​
+ +γb,Cov(ϕ 
+γ
+​
+ )=C 
+0
+​
+ +γC 
+Δ
+​
+ ,C 
+Δ
+​
+ ⪰0.
+The expected Mahalanobis score is
+
+E
+[
+D
+2
+(
+ϕ
+γ
+)
+]
+=
+tr
+⁡
+(
+C
+0
+−
+1
+(
+C
+0
++
+γ
+C
+Δ
+)
+)
++
+γ
+2
+b
+⊤
+C
+0
+−
+1
+b
+.
+E[D 
+2
+ (ϕ 
+γ
+​
+ )]=tr(C 
+0
+−1
+​
+ (C 
+0
+​
+ +γC 
+Δ
+​
+ ))+γ 
+2
+ b 
+⊤
+ C 
+0
+−1
+​
+ b.
+So
+
+E
+[
+D
+2
+(
+ϕ
+γ
+)
+]
+=
+d
++
+γ
+tr
+⁡
+(
+C
+0
+−
+1
+C
+Δ
+)
++
+γ
+2
+b
+⊤
+C
+0
+−
+1
+b
+,
+E[D 
+2
+ (ϕ 
+γ
+​
+ )]=d+γtr(C 
+0
+−1
+​
+ C 
+Δ
+​
+ )+γ 
+2
+ b 
+⊤
+ C 
+0
+−1
+​
+ b,
+which is nondecreasing in corruption severity, and strictly increasing when either the feature mean shifts or the feature covariance increases.
+
+Theorem 3 — MP-OOD score increases with corruption severity.
+Under stable LIF/PLIF dynamics and a corruption family that shifts membrane-feature mean or covariance, the expected Mahalanobis MP-OOD score is monotone in severity.
+
+This is the theory reviewers will want: it ties event corruption severity → input-current shift → membrane trajectory shift → Mahalanobis score increase.
+
+Why membrane potential is strictly richer than spike count
+This is the cleanest novelty argument.
+
+Spike count methods already exist for SNN OOD detection; prior SNN OOD work characterizes internal activations using spike count patterns. 
+ Your method should explicitly beat and theoretically distinguish itself from that prior.
+
+Proposition — Spike counts discard detectable subthreshold OOD shifts.
+Take a scalar neuron with threshold 
+θ
+θ. Suppose ID inputs produce membrane potentials 
+u
+t
+∈
+[
+0
+,
+θ
+−
+ε
+]
+u 
+t
+​
+ ∈[0,θ−ε]. Now apply an OOD corruption that shifts every membrane potential by 
+0
+<
+δ
+<
+ε
+0<δ<ε. Then
+
+s
+t
+I
+D
+=
+0
+,
+s
+t
+O
+O
+D
+=
+0
+s 
+t
+ID
+​
+ =0,s 
+t
+OOD
+​
+ =0
+for every timestep, so spike count cannot distinguish ID from OOD. But
+
+u
+ˉ
+O
+O
+D
+−
+u
+ˉ
+I
+D
+=
+δ
+,
+u
+ˉ
+  
+OOD
+ − 
+u
+ˉ
+  
+ID
+ =δ,
+so a membrane-potential detector can distinguish them.
+
+This gives a powerful reviewer-facing sentence:
+
+Spike-count OOD detects only threshold-crossing distribution shift; MP-OOD detects both threshold-crossing and subthreshold shift.
+
+That is the conceptual novelty.
+
+Additional ablations that would make this NeurIPS/ICLR-strength
+The current roadmap already includes EventCorrupt-C, MP-OOD, GEN1→DSEC transfer, and layer/statistic ablations. 
+
+ To make it stronger, add these:
+
+1. Same detector, different representation
+Run Mahalanobis on:
+
+Representation	Purpose
+Spike count	closest prior baseline
+Spike timing / inter-spike interval	tests temporal spike information
+Membrane mean only	validates drift theorem
+Membrane variance only	validates noise theorem
+Membrane kurtosis only	tests heavy-tailed corruption
+Full membrane trajectory	strongest MP-OOD
+ASAB bridge output	tests whether ANN bridge features are enough
+ANN penultimate features	tests whether SNN membrane is uniquely useful
+Detection logits / energy	standard ANN-style OOD baseline
+The key table should show that membrane trajectory > membrane summary > spike count > logits/energy.
+
+2. Severity monotonicity test
+For each corruption, plot:
+
+severity 
+s
+vs.
+E
+[
+D
+MP-OOD
+2
+]
+severity svs.E[D 
+MP-OOD
+2
+​
+ ]
+and report Spearman correlation between severity and MP-OOD score. This directly validates Theorem 3.
+
+3. mAP-drop prediction
+Do not only report AUROC. Report whether the OOD score predicts detector failure:
+
+Δ
+mAP
+(
+x
+)
+≈
+g
+(
+D
+MP-OOD
+2
+(
+x
+)
+)
+.
+ΔmAP(x)≈g(D 
+MP-OOD
+2
+​
+ (x)).
+Metrics:
+
+R
+2
+,
+ρ
+Spearman
+,
+AURC / risk-coverage
+.
+R 
+2
+ ,ρ 
+Spearman
+​
+ ,AURC / risk-coverage.
+This changes the contribution from “detects OOD” to “predicts reliability collapse.”
+
+4. Closed-loop adaptive detection
+This is the most important top-venue upgrade.
+
+Use MP-OOD to adapt inference:
+
+τ
+conf
+(
+x
+)
+=
+τ
+0
++
+α
+⋅
+σ
+(
+D
+2
+(
+x
+)
+)
+,
+τ 
+conf
+​
+ (x)=τ 
+0
+​
+ +α⋅σ(D 
+2
+ (x)),
+or
+
+τ
+NMS
+(
+x
+)
+=
+τ
+0
+−
+β
+⋅
+σ
+(
+D
+2
+(
+x
+)
+)
+.
+τ 
+NMS
+​
+ (x)=τ 
+0
+​
+ −β⋅σ(D 
+2
+ (x)).
+Then show that corrupted mAP improves versus fixed thresholds. This turns the paper into:
+
+Membrane-potential OOD detection enables reliability-aware event detection.
+
+Report:
+
+Method	Clean mAP	Corrupted mAP	mPC	rPC	AUROC	Energy overhead
+Fixed detector						
+Energy-triggered adaptation						
+Spike-count-triggered adaptation						
+MP-OOD-triggered adaptation						
+5. Normalizing flow on membrane trajectories
+Mahalanobis is easy to dismiss as 2018-style. Add a learned density estimator:
+
+p
+ψ
+(
+ϕ
+)
+=
+p
+0
+(
+f
+ψ
+(
+ϕ
+)
+)
+∣
+det
+⁡
+∂
+f
+ψ
+∂
+ϕ
+∣
+.
+p 
+ψ
+​
+ (ϕ)=p 
+0
+​
+ (f 
+ψ
+​
+ (ϕ)) 
+​
+ det 
+∂ϕ
+∂f 
+ψ
+​
+ 
+​
+  
+​
+ .
+Then compare:
+
+OOD score	Trainable?	Uses membrane?	Reviewer perception
+Mahalanobis-MP	No	Yes	simple baseline
+Gaussian mixture MP	light	Yes	stronger density
+Normalizing flow MP	Yes	Yes	top-venue-strength
+kNN-MP	No	Yes	nonparametric
+Energy/logit	No	No	baseline
+Claim: Mahalanobis is the training-free variant; flow-MP is the expressive density variant.
+
+6. SNN-vs-ANN degradation profile
+Keep RVT as the ANN baseline. Your proposal already mentions SNN-vs-ANN degradation as a needed fix. The Neftci paper compares against ANN/RNN methods and positions its hybrid design as lower-compute and neuromorphic-friendly. 
+
+ You need to show not only that SNNs degrade, but that they degrade differently.
+
+For each corruption:
+
+Δ
+c
+=
+mAP
+c
+l
+e
+a
+n
+−
+mAP
+c
+,
+s
+mAP
+c
+l
+e
+a
+n
+.
+Δ 
+c
+​
+ = 
+mAP 
+clean
+​
+ 
+mAP 
+clean
+​
+ −mAP 
+c,s
+​
+ 
+​
+ .
+Compare Neftci hybrid vs RVT vs possibly pure SNN if available.
+
+7. Sensor-realistic corruption calibration
+EventCorrupt-C is good, but a reviewer may say it is synthetic. Add real sensor grounding:
+
+Corruption	Real source
+hot pixels	refractory/noisy pixels
+event flood	lighting transition / HDR flicker
+polarity flip	polarity imbalance / calibration error
+temporal jitter	timestamp noise / bandwidth bottleneck
+event rate shift	contrast threshold mismatch
+spatial dropout	lens occlusion / dead pixels
+Then show that high-severity EventCorrupt-C correlates with GEN1→DSEC zero-shot degradation. Your proposal already frames GEN1→DSEC as the real-world anchor. 
+
+
+Revised top-venue contribution list
+I would rewrite the paper around these claims:
+
+EventCorrupt-C: the first event-stream corruption benchmark for object detection, with sensor-grounded corruptions and real cross-sensor GEN1→DSEC validation.
+
+Membrane Trajectory OOD: a theory-backed OOD framework showing that LIF/PLIF membrane mean and variance shift monotonically under event-stream covariate shift.
+
+MP-Density: a family of OOD scores from training-free Mahalanobis to learned normalizing-flow density over membrane trajectories.
+
+Closed-loop reliability: MP-OOD is not just a detector; it triggers adaptive confidence/NMS/event-denoising thresholds and recovers corrupted mAP.
+
+That version is much closer to a NeurIPS/ICLR submission than the original roadmap.
+
+
+
+Sources
+
+Can you explain the Neftci paper like step by step? What is it be PLIF neuron?
+
+Thought for 16s
+Yes — the Neftci CVPR 2025 paper is basically about making an event-camera object detector that keeps the efficiency of SNNs but recovers much of the accuracy of ANNs.
+
+Big picture
+The paper’s main idea is:
+
+Use SNN layers first, because event-camera data is sparse and time-based, then convert the SNN spikes into dense ANN-style feature maps, then use ANN/RNN layers and a YOLOX-style detection head for accurate object detection.
+
+So the model is not a pure SNN. It is a hybrid SNN-ANN detector.
+
+Event cameras output asynchronous events rather than normal image frames. Each event is:
+
+e
+n
+=
+(
+x
+n
+,
+y
+n
+,
+t
+n
+,
+p
+n
+)
+e 
+n
+​
+ =(x 
+n
+​
+ ,y 
+n
+​
+ ,t 
+n
+​
+ ,p 
+n
+​
+ )
+where 
+x
+,
+y
+x,y are pixel location, 
+t
+t is timestamp, and 
+p
+p is polarity: brightness increased or decreased. The paper converts these events into a tensor of shape 
+T
+×
+2
+×
+H
+×
+W
+T×2×H×W, where 
+T
+T is the number of time bins and the 2 channels correspond to positive and negative polarity events. 
+
+
+Step-by-step architecture
+Step 1: Event stream → event tensor
+Raw event stream:
+
+{
+(
+x
+i
+,
+y
+i
+,
+t
+i
+,
+p
+i
+)
+}
+i
+=
+1
+N
+{(x 
+i
+​
+ ,y 
+i
+​
+ ,t 
+i
+​
+ ,p 
+i
+​
+ )} 
+i=1
+N
+​
+ 
+is discretized into short time bins. In their implementation, event representations are constructed from 5 ms bins, and detections during training are generated every 50 ms using the last 10 SNN time bins. 
+
+
+So instead of one RGB image, the network receives something like:
+
+Events
+∈
+R
+T
+×
+2
+×
+H
+×
+W
+Events∈R 
+T×2×H×W
+ 
+For GEN1, the input is sparse — the paper mentions about 98% sparsity — which is why SNN processing is attractive. 
+
+
+Step 2: SNN backbone extracts fast low-level features
+The first part is called:
+
+f
+snn
+f 
+snn
+​
+ 
+It contains multiple convolutional SNN blocks. Each block is:
+
+Convolution → BatchNorm → PLIF neuron
+
+This SNN part processes the fast temporal event stream and produces spike features:
+
+E
+spike
+=
+f
+snn
+(
+Events
+)
+E 
+spike
+​
+ =f 
+snn
+​
+ (Events)
+with shape approximately:
+
+T
+×
+C
+×
+H
+′
+×
+W
+′
+T×C×H 
+′
+ ×W 
+′
+ 
+This is still time-dependent and spike-like.
+
+What is a PLIF neuron?
+PLIF means Parametric Leaky Integrate-and-Fire neuron.
+
+A normal ANN neuron does something like:
+
+y
+=
+ReLU
+(
+W
+x
++
+b
+)
+y=ReLU(Wx+b)
+It takes an input and immediately outputs a continuous activation.
+
+An SNN neuron is different. It has a membrane potential, like a biological neuron. It accumulates input over time. If the membrane potential becomes high enough, it emits a spike.
+
+A simple intuition:
+
+PLIF neuron = a leaky bucket with a learnable leak rate.
+
+Input events add water to the bucket. The bucket leaks over time. If the water level crosses a threshold, the neuron fires a spike.
+
+The paper gives the PLIF membrane update as:
+
+V
+[
+t
+]
+=
+V
+[
+t
+−
+1
+]
++
+1
+τ
+(
+X
+[
+t
+]
+−
+(
+V
+[
+t
+−
+1
+]
+−
+V
+r
+e
+s
+e
+t
+)
+)
+V[t]=V[t−1]+ 
+τ
+1
+​
+ (X[t]−(V[t−1]−V 
+reset
+​
+ ))
+
+Here:
+
+Symbol	Meaning
+V
+[
+t
+]
+V[t]	membrane potential at time 
+t
+t
+X
+[
+t
+]
+X[t]	input current/features at time 
+t
+t
+V
+reset
+V 
+reset
+​
+ 	reset potential
+τ
+τ	time constant / leak parameter
+t
+t	discrete timestep
+The important word is parametric. In PLIF, 
+τ
+τ is trainable. The paper writes the time constant as:
+
+τ
+=
+sigmoid
+(
+w
+)
+−
+1
+τ=sigmoid(w) 
+−1
+ 
+So the network learns how fast or slow each PLIF neuron should integrate information. A small effective time constant reacts quickly; a larger one remembers information longer. 
+
+
+This is why PLIF is useful for event-camera data: fast moving objects, slow background motion, sparse events, and bursts of activity all have different temporal behavior.
+
+Step 3: ASAB bridge converts SNN spikes into ANN features
+This is the key novelty of the paper.
+
+The problem is:
+
+SNN output is sparse, binary/spike-like, and time-dependent. ANN layers prefer dense feature maps.
+
+So the authors propose an Attention-based SNN-ANN Bridge, called:
+
+β
+asab
+β 
+asab
+​
+ 
+It converts:
+
+E
+spike
+∈
+R
+T
+×
+C
+×
+H
+′
+×
+W
+′
+E 
+spike
+​
+ ∈R 
+T×C×H 
+′
+ ×W 
+′
+ 
+ 
+into:
+
+F
+out
+∈
+R
+C
+×
+H
+′
+×
+W
+′
+F 
+out
+​
+ ∈R 
+C×H 
+′
+ ×W 
+′
+ 
+ 
+So it removes the explicit time dimension while preserving useful temporal/spatial information.
+
+The ASAB bridge has two attention modules:
+
+3a. SAT: Spatial-Aware Temporal Attention
+SAT tries to answer:
+
+Across the time bins, which temporal features are important, and where spatially are they happening?
+
+It uses:
+
+Channel-wise temporal grouping
+
+Time-wise separable deformable convolution
+
+Temporal self-attention
+
+The deformable convolution is important because event data is sparse and irregular. A normal square convolution kernel may not match event structures well. Deformable convolution allows the sampling grid to shift adaptively. 
+
+
+3b. ERS: Event-Rate Spatial Attention
+ERS tries to answer:
+
+Where are the active event regions?
+
+It sums spike activity over time:
+
+S
+rate
+=
+∑
+t
+=
+1
+T
+E
+spike
+(
+t
+,
+:
+,
+:
+,
+:
+)
+S 
+rate
+​
+ = 
+t=1
+∑
+T
+​
+ E 
+spike
+​
+ (t,:,:,:)
+Then it applies a sigmoid to create a spatial attention map and multiplies it with the SAT output. So active event regions get emphasized. 
+
+
+Step 4: ANN backbone extracts high-level spatial features
+After ASAB, the features are now dense:
+
+F
+out
+=
+β
+asab
+(
+E
+spike
+)
+F 
+out
+​
+ =β 
+asab
+​
+ (E 
+spike
+​
+ )
+Then the ANN blocks process them using standard CNN-style operations:
+
+Convolution → Normalization → ReLU
+
+This part is good at learning high-level spatial patterns, such as cars and pedestrians.
+
+So the division of labor is:
+
+Component	Job
+SNN blocks	fast sparse temporal processing
+ASAB bridge	convert spikes to dense feature maps
+ANN blocks	high-level spatial feature extraction
+Detection head	bounding boxes and classes
+Step 5: Optional RNN / DWConvLSTM variant
+They also add a variant with DWConvLSTM modules.
+
+Why?
+
+The SNN captures fast dynamics from short event windows. But driving scenes also have slower temporal patterns: cars moving over several frames, pedestrians moving gradually, etc.
+
+So the RNN variant captures slower dynamics after the SNN-ANN bridge. The paper calls this a multi-timescale model: SNN for short timescale, DWConvLSTM for longer timescale. 
+
+
+Step 6: Detection head
+Finally, the processed features go into a YOLOX-style detection system with:
+
+Loss	Purpose
+IoU loss	bounding box localization
+classification loss	object class
+regression loss	box coordinate refinement
+The datasets are GEN1 and GEN4 Automotive Detection. GEN1 has car and pedestrian classes, while GEN4 includes car, pedestrian, and two-wheeler. 
+
+
+Main results
+The proposed hybrid model has 6.6M parameters and achieves:
+
+Model	GEN1 mAP
+Events-RetinaNet	0.34
+Proposed Hybrid	0.35
+EMS-RES34 SNN	0.31
+Proposed + RNN	0.43
+RVT-B	0.47
+So the base hybrid model beats prior SNN detectors and is competitive with ANN methods, but the strongest RNN/transformer methods still perform better. The proposed+RNN version improves to 0.43 mAP while still being relatively compact at 7.7M parameters. 
+
+
+Why the ASAB bridge matters
+Their ablation study shows:
+
+Variant	mAP
+Without ASAB	0.30
+Proposed full ASAB	0.35
+So ASAB gives a clear improvement. The paper argues this is because simple spike accumulation loses useful spatial-temporal structure, while ASAB keeps temporal relations and spatial event activity. 
+
+
+Hardware/energy part
+A major selling point is that the SNN part can run on neuromorphic hardware. They implemented the SNN block on Intel Loihi 2.
+
+The SNN block ran at around 1.7 W and about 1.9 ms per step, faster than the 5 ms timestep used in the architecture. They also quantized weights to int8 with little accuracy loss, reporting mAP 0.348 for float16 vs. 0.343 for int8. 
+
+
+This supports the paper’s claim:
+
+Use SNNs where they are hardware-efficient, and use ANNs where they are accuracy-efficient.
+
+How this connects to your OOD project
+For your MP-OOD idea, the most important part is the PLIF neuron. The PLIF neuron has an internal membrane potential 
+V
+[
+t
+]
+V[t]. The normal detector uses the output spikes/features, but your OOD method can read the hidden membrane potential trajectory.
+
+So in this Neftci model:
+
+Paper component	Useful for your OOD idea?
+PLIF neurons	Yes — source of membrane potential
+SNN blocks	Yes — hook here
+ASAB bridge	Maybe — compare membrane vs. bridge features
+ANN blocks	Good baseline feature representation
+YOLOX head	Good for MSP/Energy baselines
+GEN1 setup	Matches your corruption benchmark
+So the Neftci model is actually a very good testbed for your OOD idea because it has clear convolutional PLIF blocks before the ANN part.
+
+
+Sources
+
+
+Voice

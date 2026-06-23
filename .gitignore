@@ -55,3 +55,6 @@ tests/
 pytest.ini
 run_analysis_tests.py
 test_ideas/
+
+# Local-only Modal cloud scripts — never committed/pushed
+modal/

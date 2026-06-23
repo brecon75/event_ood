@@ -596,37 +596,22 @@ is future work.
 
 \subsection{Compute accounting}
 \label{sec:compute}
-We quantify the added cost on top of the detection forward pass the system already runs
-(Table~\ref{tab:compute}; per-frame, order-of-magnitude). The \emph{signal} $\varphi$ is a register
-read plus three per-channel moments over $704$ channels $\times$ $T{=}10$ steps -- a few$\times10^4$
-reductions, \emph{no} MACs and \emph{no} weight fetches. The \emph{detector} (MDD) operates on the
-$2112$-D $\varphi$: standardize, project to PCA-$64$ ($\sim\!1.4\times10^5$ MACs), a radius /
-empirical-covariance Mahalanobis in $64$-D, a layer-4 Mahalanobis, and the cosine-$k$NN that
-conditions RCF over an $n_{\mathrm{ref}}{=}15$k reference ($\sim\!10^6$ MACs, the dominant term) ---
-$\approx 1.7\times10^6$ MACs/frame in total. The host hybrid detector ($6.6$M parameters) costs of
-order $10^9$ FLOPs/frame, so \textbf{MDD adds $\sim$0.1\%} over the detection that runs anyway. An
-ANN OOD baseline instead requires a \emph{second}, non-spiking forward pass (e.g.\ ResNet-18,
-$\sim\!1.8\times10^9$ FLOPs) --- $\approx +100\%$. (Reproducing the benchmark: the one-time GPU cost
-is extraction --- $31$ runs $\times$ $\sim\!343$k frames at $B{=}1$, producing $\sim\!90$--$150$\,GB
-of $\varphi$; every downstream stage then runs on the $2112$-D $\varphi$ in minutes to an hour on a
-single GPU.)
-
-\begin{table}[t]
-  \centering\small
-  \begin{tabularx}{\linewidth}{@{}l l X@{}}
-    \toprule
-    Stage & Added cost / frame & Relative to the detection forward pass \\
-    \midrule
-    $\varphi$ signal extraction & register read + moments, $0$ MACs & $\approx 0\%$ (a free byproduct) \\
-    MDD detector (on $2112$-D $\varphi$) & $\sim 1.7\times10^6$ MACs & $\sim 0.1\%$ \\
-    ANN OOD baseline (2nd forward pass) & $\sim 1.8\times10^9$ FLOPs & $\approx +100\%$ \\
-    \bottomrule
-  \end{tabularx}
-  \caption{Per-frame compute added for OOD detection, relative to the host detector's own forward
-  pass ($\sim\!10^9$ FLOPs). Order-of-magnitude estimates. The membrane signal is free; the MDD test
-  is $\sim\!1000\times$ cheaper than a second network, which is what ANN OOD detectors require.}
-  \label{tab:compute}
-\end{table}
+We separate the cost of the \emph{signal} from that of the \emph{detector}. The signal $\varphi$ is
+extracted by Global Average Pooling the membrane state and taking three per-channel moments
+$[\mu,\sigma^2,\kappa]$ over $704$ channels $\times$ $T{=}10$ steps (\texttt{monitor.py}): only local
+reductions over state the forward pass already produced --- \emph{no learned transform, no weight
+fetches, and no synaptic MACs}. This is the precise sense of ``zero added inference compute,'' and
+it is a property of the extraction code, not an estimate. The detector (MDD) runs host-side on the
+per-frame $2112$-D vector: standardize, a PCA-$64$ projection, two Mahalanobis branches (PCA-$64$
+and the layer-$4$ block), and the cosine-$k$NN that conditions RCF against the clean reference (the
+dominant term, and the only one that grows with the reference size; here a full $204$k-frame clean
+reference). We report its end-to-end throughput as a \emph{measured} quantity:
+$\sim\!2.7\times10^4$ frames/s ($\approx 0.037$\,ms/frame, batched scoring of held-out $\varphi$
+through a fitted MDD, including all four branches and the full cosine-$k$NN) on a single NVIDIA
+RTX~4060 laptop GPU. Reproducing the benchmark:
+the one-time GPU cost is extraction --- $31$ runs $\times$ $\sim\!343$k frames at $B{=}1$, producing
+$\sim\!90$--$150$\,GB of $\varphi$; every downstream stage then runs on the $2112$-D $\varphi$ in
+minutes to an hour on one GPU.
 
 \subsection{The Manifold-Decomposition Detector (MDD)}
 \label{sec:mdd}
@@ -1228,9 +1213,14 @@ To test robustness to its three free knobs, \texttt{analysis/mdd\_sensitivity.py
 time around the shipped defaults --- PCA dimensionality \texttt{k\_pca} ($64$), cosine-$k$NN
 neighbours \texttt{k\_nn} ($64$) for the RCF branch, and clean-reference size \texttt{n\_ref}
 ($15000$) --- refitting the MDD for each value and re-scoring the existing $\varphi$ (no
-re-extraction), reporting fused AUROC at $W{=}1$ and the deployable $W{=}64$ window.
-\todofig{Insert the \texttt{mdd\_sensitivity.csv} curves (fused AUROC vs.\ \texttt{k\_pca} /
-\texttt{k\_nn} / \texttt{n\_ref}) once run on the cluster; the script is committed and validated.}
+re-extraction), reporting fused AUROC at $W{=}1$ and the deployable $W{=}64$ window. Run on the full
+L5 grid (\texttt{outputs/results/mdd\_sensitivity.csv}, $168$ rows), \textbf{MDD is insensitive to
+all three knobs}: at $W{=}64$ the fused AUROC of every corruption varies by $\le 0.01$ across
+\texttt{k\_pca}$\in[16,256]$ and by $\le 0.024$ across \texttt{k\_nn}$\in[8,128]$ (the largest
+swings are on the two residuals --- \texttt{spatial\_dropout} $0.533\!\to\!0.557$,
+\texttt{polarity\_flip} $0.572\!\to\!0.584$ --- while the four solved corruptions move $\le 0.01$),
+and it is flat in \texttt{n\_ref} (the RCF uses the full clean reference regardless). The shipped
+defaults sit on this plateau, so no per-dataset tuning is required.
 
 \section{Free-Rider Validity Check}
 \label{app:freerider}

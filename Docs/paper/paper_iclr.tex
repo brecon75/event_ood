@@ -644,7 +644,38 @@ folds an empirical-covariance Mahalanobis into B1 (\texttt{radius}$'$) and repla
 with a studentized combiner $\max-\alpha\cdot\mathrm{median}$ ($\alpha\!\approx\!0.5$); the
 derivation and ablation are in Appendices~\ref{app:mdd-branches}--\ref{app:fusion}. The detector
 is fit once on clean-train only and is corruption-blind; an optional per-recording aggregation
-integrates the consistent per-sequence bias.
+integrates the consistent per-sequence bias. Figure~\ref{fig:mdd-flow} shows the full pipeline.
+
+\begin{figure}[t]
+  \centering
+  \resizebox{\linewidth}{!}{%
+  \begin{tikzpicture}[
+    font=\footnotesize, >={Latex[length=2.2mm]}, node distance=6mm and 9mm,
+    box/.style={draw, rounded corners=2pt, align=center, inner sep=4pt, minimum height=9mm, fill=black!4},
+    br/.style={draw, rounded corners=2pt, align=center, inner sep=3.5pt, minimum height=8mm, fill=blue!5}]
+    \node[box] (phi) {$\varphi$\\[1pt]\scriptsize 2112-D};
+    \node[box, right=of phi] (proj) {standardize\\ $+$ PCA-64\\ $\to z$};
+    \node[br, right=14mm of proj, yshift=16mm]  (b1) {\textbf{B1} radius$'$\\[1pt]\scriptsize $\lVert z\rVert$ energy $+$ emp-cov};
+    \node[br, below=3mm of b1]  (b2) {\textbf{B2} RCF\\[1pt]\scriptsize cosine-$k$NN under-dispersion};
+    \node[br, below=3mm of b2]  (b3) {\textbf{B3} L4 Maha\\[1pt]\scriptsize timing subspace};
+    \node[br, below=3mm of b3]  (b4) {\textbf{B4} spatial\\[1pt]\scriptsize \texttt{phi\_spatial} (optional)};
+    \node[box, right=15mm of b2, yshift=-4mm] (fuse) {studentized\\ fusion\\ $\max-\alpha\,\mathrm{med}$};
+    \node[box, right=of fuse] (win) {window\\ agg.\ ($W$)};
+    \node[box, right=of win] (out) {OOD\\ score};
+    \draw[->] (phi) -- (proj);
+    \foreach \b in {b1,b2,b3,b4} {\draw[->] (proj.east) -- (\b.west); \draw[->] (\b.east) -- (fuse.west);}
+    \draw[->] (fuse) -- (win);
+    \draw[->] (win) -- (out);
+    \node[above=1.5mm of fuse, font=\scriptsize\itshape, text=black!60] {branch scales calibrated on held-out clean};
+  \end{tikzpicture}}
+  \caption{\textbf{The MDD pipeline.} The membrane descriptor $\varphi$ is standardized and PCA-64
+  denoised to $z$, which feeds four orthogonal, two-sided branches (B1 energy/covariance, B2 the
+  novel direction-conditioned RCF, B3 deep-layer timing, B4 optional spatial). Branch scales are
+  calibrated on held-out clean; a studentized $\max-\alpha\,\mathrm{median}$ fuses them into a
+  per-frame OOD score, optionally aggregated over a $W$-frame window. Fit once on clean, fully
+  corruption-blind.}
+  \label{fig:mdd-flow}
+\end{figure}
 
 % =====================================================================
 \section{Experimental Results}
@@ -754,7 +785,7 @@ improved-MDD default (\texttt{radius}$'$ + studentized fusion), lifted verbatim 
 
 \begin{figure}[t]
   \centering
-  \includegraphics[width=0.62\linewidth]{18_roc_curves_L5.png}
+  \includegraphics[width=0.72\linewidth]{18_roc_curves_L5.png}
   \caption{ROC curves of the improved fused MDD at L5 (per-frame), clean vs.\ each corruption.
   Source: \texttt{plot\_corruption\_graphs.py} (\texttt{18\_roc\_curves\_L5}).}
   \label{fig:roc}
@@ -773,13 +804,13 @@ an axis (Appendix~\ref{app:extra-figs}, Figure~\ref{fig:similarity}).
 
 \begin{figure}[t]
   \centering
-  \begin{tabular}{@{}ccc@{}}
-    \includegraphics[width=0.32\linewidth]{05_radial_energy_kde_L5.png} &
-    \includegraphics[width=0.32\linewidth]{06_mahalanobis_d2_hist_L5.png} &
-    \includegraphics[width=0.32\linewidth]{08_pca_drift_arrows_L5.png} \\
+  \begin{tabular}{@{}cc@{}}
+    \includegraphics[width=0.49\linewidth]{05_radial_energy_kde_L5.png} &
+    \includegraphics[width=0.49\linewidth]{06_mahalanobis_d2_hist_L5.png} \\
     {\scriptsize (a) radial energy $\lVert z\rVert$} &
-    {\scriptsize (b) Mahalanobis $d^2$ (inversion)} &
-    {\scriptsize (c) PCA drift arrows} \\
+    {\scriptsize (b) Mahalanobis $d^2$ (inversion)} \\[4pt]
+    \multicolumn{2}{c}{\includegraphics[width=0.49\linewidth]{08_pca_drift_arrows_L5.png}} \\
+    \multicolumn{2}{c}{\scriptsize (c) clean$\to$corrupt PCA drift arrows} \\
   \end{tabular}
   \caption{\textbf{Geometry of corruption (L5, leakage-safe).} (a) Dilations move energy right,
   contractions left, polarity overlaps clean. (b) Contractions sit at \emph{smaller} $d^2$ than
@@ -801,18 +832,18 @@ $\alpha$ knob trades polarity vs.\ dropout (Figure~\ref{fig:branches}c).
 
 \begin{figure}[t]
   \centering
-  \begin{tabular}{@{}ccc@{}}
-    \includegraphics[width=0.32\linewidth]{04_branch_heatmap_L5.png} &
-    \includegraphics[width=0.32\linewidth]{15_baseline_vs_improved_bars.png} &
-    \includegraphics[width=0.32\linewidth]{16_alpha_tradeoff.png} \\
-    {\scriptsize (a) branch $\times$ corruption} &
-    {\scriptsize (b) baseline vs.\ improved} &
-    {\scriptsize (c) $\alpha$ trade-off} \\
+  \begin{tabular}{@{}cc@{}}
+    \includegraphics[width=0.49\linewidth]{04_branch_heatmap_L5.png} &
+    \includegraphics[width=0.49\linewidth]{15_baseline_vs_improved_bars.png} \\
+    {\scriptsize (a) per-branch AUROC, corruption $\times$ branch} &
+    {\scriptsize (b) baseline \texttt{max} vs.\ improved} \\[4pt]
+    \multicolumn{2}{c}{\includegraphics[width=0.49\linewidth]{16_alpha_tradeoff.png}} \\
+    \multicolumn{2}{c}{\scriptsize (c) studentization $\alpha$ trade-off (dropout$\uparrow$, polarity$\downarrow$)} \\
   \end{tabular}
   \caption{\textbf{Branches and fusion (per-sequence, L5).} (a) Per-branch AUROC heatmap.
   (b) Baseline \texttt{max} vs.\ improved (\texttt{radius}$'$ + studentized fusion). (c) AUROC
-  vs.\ studentization $\alpha$: dropout$\uparrow$, polarity$\downarrow$. Source:
-  \texttt{plot\_corruption\_graphs.py}. The combiner sweep is Figure~\ref{fig:combiners}.}
+  vs.\ studentization $\alpha$. Source: \texttt{plot\_corruption\_graphs.py}. The combiner sweep is
+  Figure~\ref{fig:combiners}.}
   \label{fig:branches}
 \end{figure}
 
@@ -861,8 +892,8 @@ why these two are the honest hard cases.
 \begin{figure}[t]
   \centering
   \begin{tabular}{@{}cc@{}}
-    \includegraphics[width=0.42\linewidth]{01_window_sweep_fused_L5.png} &
-    \includegraphics[width=0.42\linewidth]{23_best_results_by_severity.png} \\
+    \includegraphics[width=0.49\linewidth]{01_window_sweep_fused_L5.png} &
+    \includegraphics[width=0.49\linewidth]{23_best_results_by_severity.png} \\
     {\scriptsize (a) fused AUROC vs.\ window} &
     {\scriptsize (b) best AUROC vs.\ severity} \\
   \end{tabular}
@@ -1074,7 +1105,7 @@ diffuse clean noise cancels. Table~\ref{tab:mdd-improve} and Figure~\ref{fig:imp
 
 \begin{figure}[t]
   \centering
-  \includegraphics[width=0.6\linewidth]{22_improvement_by_severity.png}
+  \includegraphics[width=0.72\linewidth]{22_improvement_by_severity.png}
   \caption{Improved $-$ baseline per-sequence AUROC, per corruption $\times$ severity. Source:
   \texttt{plot\_corruption\_graphs.py} (\texttt{22\_improvement\_by\_severity}).}
   \label{fig:improve}
@@ -1118,7 +1149,7 @@ fusion buys nothing per-frame and fails to generalize (LR leave-one-out $\approx
 
 \begin{figure}[t]
   \centering
-  \includegraphics[width=0.62\linewidth]{17_fusion_combiners.png}
+  \includegraphics[width=0.72\linewidth]{17_fusion_combiners.png}
   \caption{Fusion-combiner sweep across corruptions (per-sequence, L5). Source:
   \texttt{plot\_corruption\_graphs.py} (\texttt{17\_fusion\_combiners}).}
   \label{fig:combiners}
@@ -1133,8 +1164,8 @@ per-frame$\to$windowed$\to$per-sequence climb ($0.55\to0.89$ at $W{=}64\to1.00$)
 \begin{figure}[t]
   \centering
   \begin{tabular}{@{}cc@{}}
-    \includegraphics[width=0.46\linewidth]{02_window_branches_L5.png} &
-    \includegraphics[width=0.40\linewidth]{19_window_heatmap_L5.png} \\
+    \includegraphics[width=0.49\linewidth]{02_window_branches_L5.png} &
+    \includegraphics[width=0.49\linewidth]{19_window_heatmap_L5.png} \\
     {\scriptsize (a) per-branch vs.\ window} & {\scriptsize (b) corruption $\times$ window} \\
   \end{tabular}
   \caption{Window sweep detail. Source: \texttt{plot\_corruption\_graphs.py}.}
@@ -1247,17 +1278,17 @@ branch \emph{nails} \texttt{event\_flood} ($1.000$) but stays below chance on
 Figure~\ref{fig:similarity} collects the remaining geometry/diagnostic panels.
 \begin{figure}[t]
   \centering
-  \begin{tabular}{@{}ccc@{}}
-    \includegraphics[width=0.31\linewidth]{10_corruption_similarity_matrix.png} &
-    \includegraphics[width=0.31\linewidth]{21_phi_spatial_kde.png} &
-    \includegraphics[width=0.31\linewidth]{20_sigma2_shrinkage_violin.png} \\
+  \begin{tabular}{@{}cc@{}}
+    \includegraphics[width=0.49\linewidth]{10_corruption_similarity_matrix.png} &
+    \includegraphics[width=0.49\linewidth]{21_phi_spatial_kde.png} \\
     {\scriptsize (a) corruption similarity} &
-    {\scriptsize (b) \texttt{phi\_spatial} KDE} &
-    {\scriptsize (c) $\sigma^2$ shrinkage} \\
-    \includegraphics[width=0.31\linewidth]{09_corruption_fingerprint_heatmap.png} &
-    \includegraphics[width=0.31\linewidth]{07_pca_scatter_shared_L5.png} &
-    \includegraphics[width=0.31\linewidth]{13_energy_d2_violins.png} \\
-    {\scriptsize (d) channel-shift fingerprint} &
+    {\scriptsize (b) \texttt{phi\_spatial} KDE} \\[4pt]
+    \includegraphics[width=0.49\linewidth]{20_sigma2_shrinkage_violin.png} &
+    \includegraphics[width=0.49\linewidth]{09_corruption_fingerprint_heatmap.png} \\
+    {\scriptsize (c) $\sigma^2$ shrinkage} &
+    {\scriptsize (d) channel-shift fingerprint} \\[4pt]
+    \includegraphics[width=0.49\linewidth]{07_pca_scatter_shared_L5.png} &
+    \includegraphics[width=0.49\linewidth]{13_energy_d2_violins.png} \\
     {\scriptsize (e) shared-PCA scatter} &
     {\scriptsize (f) log $d^2$ violins} \\
   \end{tabular}

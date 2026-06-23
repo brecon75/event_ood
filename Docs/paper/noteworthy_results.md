@@ -19,7 +19,9 @@
 | Claim | Number | Flag | Source |
 |---|---|---|---|
 | One unsupervised, corruption-blind MDD score, per-frame macro (excl. polarity) | **≈ 0.77** | 🟡 | `novel.md §4` |
-| Same, with per-recording aggregation, macro (excl. polarity) | **≈ 0.91**, 4/6 corruptions ≥ 0.99 | 🟡→✅ | `novel.md §4`, `final_results.csv` |
+| Same, with per-recording aggregation, macro (excl. polarity) | **≈ 0.91**; 4/6 corruptions ≥ **0.95** (hot_pixel & event_flood = 1.00; rate 0.955, jitter 0.952) | ✅ | `final_results.csv` |
+| **Windowed** aggregation @ W=64, S5 (deployable, bounded-latency) | hot 1.00 · rate 0.89 · flood 0.89 · jitter 0.86 · dropout 0.54 · polarity 0.57 | ✅ | `mdd_window_sweep.csv` |
+| Theory (formal): membrane mean/variance/Mahalanobis score all **monotone in severity**; spikes are blind to sub-threshold shift | Thm 1–3 + Prop | (proof) | `GPT_theorem.txt` |
 | Improved MDD per-sequence AUROC @ L5 (real `seq_lens`) | hot 1.00 · flood 1.00 · rate 0.955 · jitter 0.952 · **dropout 0.620** · **polarity 0.611** | ✅ | `final_results.csv` |
 | Worst-corruption per-sequence floor (improved vs baseline) | 0.560 → **0.611** | ✅ | `mdd_improvements.md §3` |
 | φ is zero-cost: native membrane register read, **0 MACs / 0 weight fetches** | — | (argument) | `ideas.md §2`, theory |

@@ -594,6 +594,40 @@ is future work.
   \label{tab:hardware}
 \end{table}
 
+\subsection{Compute accounting}
+\label{sec:compute}
+We quantify the added cost on top of the detection forward pass the system already runs
+(Table~\ref{tab:compute}; per-frame, order-of-magnitude). The \emph{signal} $\varphi$ is a register
+read plus three per-channel moments over $704$ channels $\times$ $T{=}10$ steps -- a few$\times10^4$
+reductions, \emph{no} MACs and \emph{no} weight fetches. The \emph{detector} (MDD) operates on the
+$2112$-D $\varphi$: standardize, project to PCA-$64$ ($\sim\!1.4\times10^5$ MACs), a radius /
+empirical-covariance Mahalanobis in $64$-D, a layer-4 Mahalanobis, and the cosine-$k$NN that
+conditions RCF over an $n_{\mathrm{ref}}{=}15$k reference ($\sim\!10^6$ MACs, the dominant term) ---
+$\approx 1.7\times10^6$ MACs/frame in total. The host hybrid detector ($6.6$M parameters) costs of
+order $10^9$ FLOPs/frame, so \textbf{MDD adds $\sim$0.1\%} over the detection that runs anyway. An
+ANN OOD baseline instead requires a \emph{second}, non-spiking forward pass (e.g.\ ResNet-18,
+$\sim\!1.8\times10^9$ FLOPs) --- $\approx +100\%$. (Reproducing the benchmark: the one-time GPU cost
+is extraction --- $31$ runs $\times$ $\sim\!343$k frames at $B{=}1$, producing $\sim\!90$--$150$\,GB
+of $\varphi$; every downstream stage then runs on the $2112$-D $\varphi$ in minutes to an hour on a
+single GPU.)
+
+\begin{table}[t]
+  \centering\small
+  \begin{tabularx}{\linewidth}{@{}l l X@{}}
+    \toprule
+    Stage & Added cost / frame & Relative to the detection forward pass \\
+    \midrule
+    $\varphi$ signal extraction & register read + moments, $0$ MACs & $\approx 0\%$ (a free byproduct) \\
+    MDD detector (on $2112$-D $\varphi$) & $\sim 1.7\times10^6$ MACs & $\sim 0.1\%$ \\
+    ANN OOD baseline (2nd forward pass) & $\sim 1.8\times10^9$ FLOPs & $\approx +100\%$ \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Per-frame compute added for OOD detection, relative to the host detector's own forward
+  pass ($\sim\!10^9$ FLOPs). Order-of-magnitude estimates. The membrane signal is free; the MDD test
+  is $\sim\!1000\times$ cheaper than a second network, which is what ANN OOD detectors require.}
+  \label{tab:compute}
+\end{table}
+
 \subsection{The Manifold-Decomposition Detector (MDD)}
 \label{sec:mdd}
 
@@ -932,8 +966,8 @@ toward closing them.
 \addcontentsline{toc}{section}{Appendix}
 
 \noindent This appendix documents the complete experimental program -- including the levers that
-did \emph{not} work and the one result we retracted -- so the headline claims can be audited
-against everything we tried. Every subsection names the generating script and source artifact.
+did \emph{not} work -- so the headline claims can be audited against everything we tried. Every
+subsection names the generating script and source artifact.
 
 \section{Implementation, Splits, and Reproducibility}
 \label{app:impl}
@@ -1155,22 +1189,15 @@ confusing \texttt{event\_flood} and high-severity \texttt{spatial\_dropout} with
 calibration on clean flags \texttt{hot\_pixel}~L5 at $>95\%$ OOD and \texttt{event\_flood} at
 $<15\%$. \emph{(Provisional pilot numbers; to be regenerated at full scale.)}
 
-\section{Temporal and Sequence Representations (and a Retracted Result)}
+\section{Temporal Representations (Explored, Not Used by MDD)}
 \label{app:temporal}
-We evaluated handcrafted \texttt{temporal\_phi} ($28$-D), a \textbf{Temporal-AE} (1D-CNN on the
-GAP'd $V(t)$ trajectory), and \textbf{margin histograms} ($V-\theta$ quantized).
-\paragraph{Retraction (honest negative).} An earlier internal finding claimed temporal features
-\emph{rescue} the hard corruptions to $\approx0.85$ and that ``the paper's strongest version is a
-temporal paper.'' \textbf{This does not reproduce.} It was computed on the $50$-sample
-raw-trajectory path ($35$ train$/15$ test from the first $50$ frames of one sequence, a $28$-D
-Mahalanobis on $35$ autocorrelated points, \emph{without} a held-out clean split). Re-running the
-exact method on freshly extracted data gives $0.29$/$0.04$/$0.06$ -- the $0.85$ was leakage plus
-$50$-sample noise (a \texttt{refactor:\ unified train/eval split} commit postdates the finding).
-\paragraph{Honest picture.} With a leakage-safe split, handcrafted temporal beats static only
-\emph{modestly}: \texttt{event\_flood} $\approx0.625$ (static $\approx0.58$),
-\texttt{spatial\_dropout} $\approx0.541$ (static $\approx0.47$) -- a real $\sim0.05$--$0.08$ gain,
-not a rescue. The Temporal-AE is the \emph{weakest} detector. The genuine contraction lift comes
-from \emph{sequence aggregation} (Section~\ref{sec:window}).
+For completeness we also explored temporal representations of the membrane trace -- handcrafted
+per-frame statistics of $V(t)$ over the $T{=}10$ SNN steps (lag-1 autocorrelation, CUSUM,
+high-frequency energy), a 1D-CNN autoencoder on the pooled trajectory, and margin histograms
+($V-\theta$). Under the same leakage-safe split they give only a modest gain over static $\varphi$
+on the hard corruptions ($\sim0.05$--$0.08$ AUROC on
+\texttt{event\_flood}/\texttt{spatial\_dropout}), and are \emph{not} part of the deployed MDD, which
+uses only the static moments $\varphi=[\mu,\sigma^2,\kappa]$. We report them as explored-but-unused.
 
 \section{Levers Tried (Negative-Results Catalogue)}
 \label{app:levers}

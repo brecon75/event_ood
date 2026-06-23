@@ -74,7 +74,9 @@ that the sub-threshold membrane potential $V_{\mathrm{mem}}(t)$ of the Parametri
 Leaky-Integrate-and-Fire (PLIF) neurons is a \emph{free byproduct} of the forward pass --
 a register the substrate already maintains -- and that its per-channel statistics
 $\varphi=[\mu,\sigma^2,\kappa]$ (a $2112$-D descriptor over $704$ channels $\times$ $4$
-layers) form an OOD signal at \emph{zero additional compute}. We contribute
+layers) form an OOD signal at \emph{zero added inference compute} -- a register read plus three
+moments, with no second forward pass -- on which a lightweight host-side detector then operates.
+We contribute
 \textbf{Gen1-C}, a reproducible, seeded event-camera corruption benchmark of six
 sensor-grounded corruptions $\times$ five severities -- each traced to a concrete hardware
 failure mechanism -- plus a released membrane-statistics feature set so OOD detectors can
@@ -123,8 +125,9 @@ failure mechanism (Figure~\ref{fig:schematic}).
 \begin{enumerate}
   \item \textbf{A zero-cost membrane OOD signal and the Gen1-C benchmark.} We introduce
         $\varphi$, an OOD signal harvested from the PLIF membrane at \emph{zero additional
-        compute}, and argue it is the only OOD method that runs inside the compute envelope
-        of the target neuromorphic hardware (Section~\ref{sec:hardware}). To evaluate it we
+        compute}, and argue it is the richest OOD signal available at zero added inference cost
+        on the target neuromorphic hardware -- needing no logits, gradients, or second forward
+        pass, and provably subsuming spike-rate signals (Section~\ref{sec:hardware}). To evaluate it we
         release \textbf{Gen1-C}: a reproducible (seeded, deterministic, model-agnostic)
         event-camera corruption benchmark of six corruptions $\times$ five monotonic
         severities, each mapped to a physical hardware failure mode
@@ -218,9 +221,13 @@ and (v) the Manifold-Decomposition Detector that follows from the theory.
 \label{sec:phi}
 
 The membrane signal is read from the pretrained hybrid SNN--ANN detector with a forward hook
-on all four PLIF layers ($704$ channels total). For each channel $c$ we apply Global Average
-Pooling (GAP) over the spatial dimensions of the sub-threshold trace $V$ and compute its first
-three central moments across the $T$ SNN time steps,
+on all four PLIF layers ($704$ channels total). Concretely, $V$ is the neuron's membrane state
+\texttt{module.v} at each of the $T{=}10$ unrolled steps (reset-inclusive: we read the raw
+maintained register, we do \emph{not} excise the steps around a spike); the linear sub-threshold
+analysis of Section~\ref{sec:theory} is therefore an approximation whose reset effects enter as a
+bounded error term (Theorem~\ref{thm:drift}), exact in the low-firing regime. For each channel $c$
+we apply Global Average Pooling (GAP) over the spatial dimensions of $V$ and compute its first
+three central moments across the $T$ steps,
 %
 \begin{equation}
   \varphi_c = \big[\mu_c,\sigma_c^2,\kappa_c\big],\qquad
@@ -440,9 +447,12 @@ levers each corruption pulls.
 until $V$ saturates at $\theta$: affected $\mu_c$ separate from the clean range, giving
 \emph{inevitable} detection (AUROC $\approx1$, monotone). \textbf{\texttt{temporal\_jitter}}
 is a measure-preserving permutation: it leaves $m,s^2$ (hence $\mathbb{E}[V]$ and the first
-variance term) unchanged but destroys $\gamma(j)$ and the lag-1 autocorrelation of $V(t)$ --
-visible only to temporal statistics and to deeper layers (larger effective $\tau$), so the L4
-slice is the strongest single view. \textbf{\texttt{event\_rate\_shift}} scales $m\!\to\!\alpha m$,
+variance term) unchanged but perturbs $\gamma(j)$ and the lag-1 autocorrelation of $V(t)$. The
+deployed MDD uses \emph{only} the static moments $\varphi=[\mu,\sigma^2,\kappa]$ (lag-1
+autocorrelation is named here as the \emph{mechanism}, not a feature we compute); jitter surfaces
+in $\varphi$ because the deeper layers' larger effective $\tau$ convert this timing change into a
+$\sigma^2$ shift -- which is why the layer-4 Mahalanobis branch, not any temporal statistic, is the
+strongest single view. \textbf{\texttt{event\_rate\_shift}} scales $m\!\to\!\alpha m$,
 displacing every channel's mean along one global-activity direction -- detectable by a 1-D
 projection, with a phase transition once $\alpha$ leaves the clean band.
 \textbf{\texttt{spatial\_dropout}} lowers the spatial input variance, hence $\sigma_c^2$, while
@@ -537,20 +547,27 @@ is a lossy thresholded projection of it.
 \subsection{The neuromorphic hardware advantage}
 \label{sec:hardware}
 
-Existing OOD detectors are designed for ANNs on von~Neumann hardware, where logits, gradients,
-and repeated forward passes are cheap. SNNs are deployed for the opposite reason -- to run within
-the energy budget of neuromorphic silicon -- and there the standard OOD toolkit is not merely
-expensive but \emph{architecturally infeasible}. On Loihi~\citep{davies2018loihi},
-BrainScaleS~\citep{schemmel2010brainscales}, and SpiNNaker~\citep{furber2014spinnaker} the
-membrane potential $V$ is physical state the substrate \emph{already maintains}; producing
-$\varphi$ is an $O(\text{channels})$ register read plus three moments -- \emph{zero MACs, zero
-weight fetches}. Table~\ref{tab:hardware} shows every competing family needs a capability the
-spiking, feed-forward, integer-event model does not provide. The benchmark of
-Section~\ref{sec:results} should therefore be read not as ``$\varphi$ narrowly beats ANN
-baselines on a GPU'' but as ``$\varphi$ provides OOD detection \emph{inside the compute envelope
-of the deployment hardware}, where the alternatives cannot be evaluated at all.'' We measure
-$\varphi$ in simulation (SpikingJelly on GPU); the cost claim is \emph{architectural} -- an
-on-silicon energy measurement is future work.
+We are careful to separate two cost claims. The \textbf{signal} $\varphi$ is zero added
+\emph{inference} compute: on Loihi~\citep{davies2018loihi}, BrainScaleS~\citep{schemmel2010brainscales},
+and SpiNNaker~\citep{furber2014spinnaker} the membrane potential $V$ is physical state the substrate
+\emph{already maintains}, so producing $\varphi$ is an $O(\text{channels})$ register read plus three
+moments per channel -- \emph{zero MACs, zero weight fetches, no second network}. The
+\textbf{detector} (MDD) is \emph{not} claimed to be free: it operates on the $2112$-D vector
+$\varphi$ off the critical path (a host or co-processor), with PCA projection, a Mahalanobis form,
+and a cosine-$k$NN for RCF. Crucially, that cost is bounded by the size of $\varphi$ -- a few
+thousand floats per frame -- and involves \emph{no second forward pass over the input}, the very
+thing every ANN OOD detector requires (Table~\ref{tab:hardware}). So the comparison is not
+``$\varphi$ beats ANN baselines on a GPU'' but ``$\varphi$ supplies an OOD signal within the SNN
+inference budget, with a lightweight downstream test, whereas the ANN detectors need a full
+non-spiking forward pass the deployment never runs.''
+
+We do not claim $\varphi$ is the \emph{only} on-chip-feasible OOD signal: simple spike-rate or
+spike-entropy statistics are equally cheap to read. We claim it is the \emph{richest} such signal
+-- it provably subsumes spike counts (Proposition~\ref{prop:spike}) -- and the only one that, unlike
+the ANN families below, needs no logits, gradients, or re-forwarding. We measure $\varphi$ in
+simulation (SpikingJelly on GPU); the inference-cost claim is \emph{architectural} (it follows from
+$V$ being a maintained register), and an on-silicon energy/latency measurement of the full pipeline
+is future work.
 
 \begin{table}[t]
   \centering\small
@@ -558,7 +575,7 @@ on-silicon energy measurement is future work.
     \toprule
     Method & Required extra computation & Why infeasible on neuromorphic HW \\
     \midrule
-    \textbf{Vmem-$\varphi$ (ours)} & native $V$ register read + moments & --- (it is free) \\
+    \textbf{Vmem-$\varphi$ (ours)} & native $V$ register read + 3 moments (signal); host-side test on a $2112$-D vector (detector) & no logits/gradients/re-forwarding; \emph{no second forward pass over the input} \\
     MSP \citep{hendrycks2017msp} / Energy \citep{liu2020energy} & softmax / log-sum-exp over logits & cores emit spikes, not float logits; no on-chip softmax \\
     ODIN \citep{liang2018odin} & temperature softmax + input perturbation & perturbation needs an input-gradient pass the chip cannot take \\
     ReAct \citep{sun2021react} & activation clipping + second forward pass & re-forwarding violates the SNN energy budget \\
@@ -568,8 +585,10 @@ on-silicon energy measurement is future work.
     \bottomrule
   \end{tabularx}
   \caption{Standard OOD detectors each require a capability absent from the spiking,
-  feed-forward, integer-event execution model; Vmem-$\varphi$ requires none because the signal
-  is the neuron state itself.}
+  feed-forward, integer-event execution model -- chiefly a second, non-spiking forward pass.
+  Vmem-$\varphi$ needs none: the signal is the neuron state itself, and the downstream test runs
+  on a small per-frame vector. (We do not claim it is the only on-chip signal -- spike-rate/entropy
+  are also cheap but carry less information, Prop.~\ref{prop:spike}.)}
   \label{tab:hardware}
 \end{table}
 
@@ -867,8 +886,15 @@ perception, where corruptions are at once \emph{harmful} (Section~\ref{sec:motiv
 \emph{hard} to detect cheaply.
 
 \paragraph{Other limitations.}
-(i)~The cost claim is \emph{architectural} (simulation, not silicon); on-chip energy is future
-work. (ii)~AUROC are single-split point estimates without bootstrap CIs. (iii)~Single dataset
+(i)~The zero-cost claim is \emph{architectural} and applies to the \emph{signal} only: $\varphi$ is
+free at inference, but the MDD detector (PCA/Mahalanobis/cosine-$k$NN) runs host-side on the
+$2112$-D vector; we measure in simulation (SpikingJelly on GPU) and an on-silicon energy/latency
+measurement of the full pipeline is future work. (i$'$)~$\varphi$ is read from the reset-inclusive
+membrane register, so the linear sub-threshold theory is an approximation; a strictly
+spike-excluded $V$ and a reset-aware analysis are untested.
+(ii)~AUROC are single-split point estimates without bootstrap CIs, and we do not yet report
+sensitivity to the PCA dimension, the cosine-$k$NN $k$, or the clean-calibration sample size.
+(iii)~Single dataset
 (Gen1); DSEC/Gen4 transfer is untested. (iv)~Severities are synthetic monotone transforms, not
 measured sensor failures -- the contribution is the benchmark/protocol/feature release.
 (v)~Per-sequence AUROC assumes a corruption is consistent across a whole recording (as in Gen1-C);
@@ -883,8 +909,9 @@ We introduced OOD detection for event-camera spiking detectors from the \emph{fr
 membrane potential, the Gen1-C corruption benchmark with its physical-mechanism grounding, a
 closed-form theory of per-corruption detectability, and the Manifold-Decomposition Detector that
 follows from a dilation/contraction diagnosis. A pretrained SOTA detector collapses under these
-corruptions; $\varphi$ is the only OOD signal that runs inside the target hardware's compute
-envelope; and one unsupervised score takes four of six corruptions to $\geq0.95$ with sequence
+corruptions; $\varphi$ is a zero-added-inference-cost OOD signal that needs no second forward pass
+and provably subsumes spike-rate signals; and one unsupervised score takes four of six corruptions
+to $\geq0.95$ with sequence
 aggregation. The two residuals are theory-predicted and released as an open challenge, with a
 concrete, biologically-grounded path -- spatial-dispersion features and adaptive neurons --
 toward closing them.

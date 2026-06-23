@@ -69,6 +69,106 @@ def _save(fig, name):
     plt.close(fig); print("wrote", name)
 
 
+# ───────────────────── CSV-derived summary figures (unified here) ─────────────
+# These read the banked result CSVs (no phi); each skips cleanly if its CSV is
+# absent. Folded in so this is the ONE figure generator for the whole paper.
+_CORR_ORDER = ["hot_pixel", "event_rate_shift", "temporal_jitter",
+               "event_flood", "polarity_flip", "spatial_dropout"]
+_CLBL = [c.replace("_", "\n") for c in _CORR_ORDER]
+
+
+def _fig_detectability(sev=5):                       # 25
+    f = RES_DIR / "final_results.csv"
+    if not f.exists(): return
+    d = pd.read_csv(f); d = d[d.severity == sev].set_index("corruption")
+    cols = ["improved_frame", "improved_w64", "improved_seq"]
+    names = ["per-frame (W=1)", "windowed (W=64)", "full sequence"]
+    colors = ["#9ecae1", "#3182bd", "#08519c"]
+    x = np.arange(len(_CORR_ORDER)); w = 0.26
+    fig, ax = plt.subplots(figsize=(8.4, 3.8))
+    for i, (c, nm, cl) in enumerate(zip(cols, names, colors)):
+        vals = [d.loc[k, c] if k in d.index else np.nan for k in _CORR_ORDER]
+        ax.bar(x + (i - 1) * w, vals, w, label=nm, color=cl, edgecolor="white")
+    ax.axhline(0.5, ls="--", lw=0.8, color="grey")
+    ax.text(len(_CORR_ORDER) - 0.5, 0.505, "chance", fontsize=11, color="grey", va="bottom", ha="right")
+    ax.axhline(0.85, ls=":", lw=0.9, color="darkgreen")
+    ax.text(len(_CORR_ORDER) - 0.5, 0.86, "solved (0.85)", fontsize=11, color="darkgreen", va="bottom", ha="right")
+    ax.set_xticks(x); ax.set_xticklabels(_CLBL, fontsize=12)
+    ax.set_ylim(0.3, 1.02); ax.set_ylabel("fused AUROC (L%d)" % sev)
+    ax.set_title("Detection by decision granularity: four solved, two residuals", fontsize=14)
+    ax.legend(fontsize=11, ncol=3, loc="lower center", frameon=False)
+    _save(fig, "25_detectability_summary_L5.png")
+
+
+def _fig_sensitivity(sev=5, window=64):              # 24
+    f = RES_DIR / "mdd_sensitivity.csv"
+    if not f.exists(): return
+    df = pd.read_csv(f)
+    df = df[(df.severity == sev) & (df.window == window) & (df.branch == "fused")]
+    params = [("k_pca", "PCA dim $k_{pca}$"), ("k_nn", "RCF neighbours $k_{nn}$"),
+              ("n_ref", "clean reference $n_{ref}$")]
+    fig, axes = plt.subplots(1, 3, figsize=(10.5, 3.4), sharey=True)
+    cmap = plt.get_cmap("tab10")
+    for ax, (p, title) in zip(axes, params):
+        sub = df[df.param == p]
+        for j, c in enumerate(_CORR_ORDER):
+            cc = sub[sub.corruption == c].sort_values("value")
+            if not cc.empty:
+                ax.plot(cc.value, cc.auroc, "-o", ms=4, lw=1.5, color=cmap(j % 10),
+                        label=c.replace("_", " "))
+        ax.set_xscale("log"); ax.set_title(title, fontsize=13)
+        ax.axhline(0.5, ls="--", lw=0.8, color="grey"); ax.grid(alpha=0.25)
+    axes[0].set_ylabel("fused AUROC (W=%d, L%d)" % (window, sev)); axes[0].set_ylim(0.45, 1.02)
+    axes[-1].legend(fontsize=10, loc="center right", frameon=False)
+    fig.suptitle("MDD is insensitive to its hyperparameters", fontsize=14)
+    fig.tight_layout(rect=[0, 0, 1, 0.94]); fig.savefig(GRAPH_DIR / "24_sensitivity_L5.png", dpi=170, bbox_inches="tight")
+    plt.close(fig); print("wrote", "24_sensitivity_L5.png")
+
+
+def _fig_representation(sev=5):                       # 26
+    f = RES_DIR / "representation_metrics.csv"
+    if not f.exists(): return
+    df = pd.read_csv(f); df = df[df.severity == sev]
+    order = ["full_membrane", "membrane_mean", "membrane_var", "membrane_kurtosis",
+             "spike", "spike_entropy", "ANN", "logits"]
+    disp = {"full_membrane": r"full $\varphi$", "membrane_mean": r"$\mu$",
+            "membrane_var": r"$\sigma^2$", "membrane_kurtosis": r"$\kappa$",
+            "spike": "spike rate", "spike_entropy": "spike entropy",
+            "ANN": "ANN feat.", "logits": "logits"}
+    piv = df.pivot_table(index="representation", columns="corruption", values="auroc")
+    piv = piv.reindex(index=[o for o in order if o in piv.index], columns=_CORR_ORDER)
+    fig, ax = plt.subplots(figsize=(9.0, 5.2))
+    im = ax.imshow(piv.values, cmap="RdBu_r", vmin=0.0, vmax=1.0, aspect="auto")
+    ax.set_xticks(range(len(_CORR_ORDER))); ax.set_xticklabels(_CLBL, fontsize=12)
+    ax.set_yticks(range(len(piv.index))); ax.set_yticklabels([disp.get(r, r) for r in piv.index], fontsize=13)
+    for i in range(piv.shape[0]):
+        for j in range(piv.shape[1]):
+            v = piv.values[i, j]
+            if np.isfinite(v):
+                ax.text(j, i, f"{v:.2f}", ha="center", va="center", fontsize=12,
+                        color="white" if abs(v - 0.5) > 0.30 else "black")
+    ax.set_title("Membrane representation ablation (Mahalanobis AUROC, L5)", fontsize=14)
+    fig.colorbar(im, ax=ax, fraction=0.045, pad=0.02, label="AUROC")
+    fig.savefig(GRAPH_DIR / "26_representation_ablation.png", dpi=170, bbox_inches="tight")
+    plt.close(fig); print("wrote", "26_representation_ablation.png")
+
+
+def _fig_detectors():                                 # 27
+    f = RES_DIR / "ood_metrics.csv"
+    if not f.exists(): return
+    m = pd.read_csv(f).groupby("detector").auroc.mean().sort_values(ascending=False)
+    names = {"pca": "PCA-Mahal", "mahalanobis": "Mahalanobis", "gmm": "GMM",
+             "ae": "MLP-AE", "flow": "RealNVP", "ocsvm": "OCSVM", "knn": "kNN"}
+    fig, ax = plt.subplots(figsize=(8.6, 4.2)); x = np.arange(len(m))
+    ax.bar(x, m.values, color=["#3182bd" if v >= 0.5 else "#d6604d" for v in m.values], edgecolor="white")
+    ax.axhline(0.5, ls="--", lw=1, color="grey")
+    for i, v in enumerate(m.values): ax.text(i, v + 0.004, f"{v:.3f}", ha="center", va="bottom", fontsize=12)
+    ax.set_xticks(x); ax.set_xticklabels([names.get(d, d) for d in m.index], rotation=20, fontsize=12)
+    ax.set_ylim(0.40, 0.62); ax.set_ylabel("mean AUROC")
+    ax.set_title("Classical OOD detectors on static $\\varphi$ (mean over 6$\\times$5)", fontsize=14)
+    _save(fig, "27_detector_comparison.png")
+
+
 def main():
     ap = LazyPhiDict(cache_size=1)
     if "clean" not in ap:
@@ -429,6 +529,11 @@ def main():
         fig.suptitle("Best MDD results: AUROC vs severity at W=1 / W=64 / full-sequence, per corruption", y=1.0)
         _save(fig, "23_best_results_by_severity.png")
     except Exception as e: print("23 fail:", e)
+
+    # ---- CSV-derived summary figures (folded in: one generator for all figures) ----
+    for _fn in (_fig_detectability, _fig_sensitivity, _fig_representation, _fig_detectors):
+        try: _fn()
+        except Exception as e: print(f"{_fn.__name__} fail:", e)
 
     print(f"\nDONE — figures in {GRAPH_DIR}")
 

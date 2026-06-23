@@ -897,7 +897,7 @@ why these two are the honest hard cases.
   corruptions cross the $0.85$ ``solved'' line (\texttt{hot\_pixel}/\texttt{event\_rate\_shift}/%
   \texttt{temporal\_jitter} already per frame, \texttt{event\_flood} with a short window);
   \texttt{polarity\_flip} and \texttt{spatial\_dropout} are the two residuals near chance at every
-  granularity. The whole result in one view. Source: \texttt{plot\_new\_graphs.py}
+  granularity. The whole result in one view. Source: \texttt{plot\_corruption\_graphs.py}
   (\texttt{final\_results.csv}).}
   \label{fig:detect}
 \end{figure}
@@ -1199,7 +1199,7 @@ detector can handle both dilations and contractions -- the motivation for MDD.
   \includegraphics[width=0.82\linewidth]{26_representation_ablation.png}
   \caption{\textbf{Membrane representation ablation} (Mahalanobis AUROC, L5). $\sigma^2/\kappa$
   carry \texttt{temporal\_jitter} while $\mu$/spike-rate do not; ANN features are the weakest
-  overall and collapse on contractions/polarity. Source: \texttt{plot\_appendix\_graphs.py}.}
+  overall and collapse on contractions/polarity. Source: \texttt{plot\_corruption\_graphs.py}.}
   \label{fig:repr}
 \end{figure}
 
@@ -1209,7 +1209,7 @@ detector can handle both dilations and contractions -- the motivation for MDD.
   \caption{\textbf{Seven classical OOD detectors on static $\varphi$}, mean AUROC over all
   corruptions/severities. PCA-Mahalanobis/Mahalanobis lead; $k$NN/OCSVM invert below chance on the
   contractions -- one-sided detectors cannot face both ways, motivating MDD. Source:
-  \texttt{plot\_appendix\_graphs.py} (\texttt{ood\_metrics.csv}).}
+  \texttt{plot\_corruption\_graphs.py} (\texttt{ood\_metrics.csv}).}
   \label{fig:detcmp}
 \end{figure}
 
@@ -1284,7 +1284,7 @@ defaults sit on this plateau, so no per-dataset tuning is required (Figure~\ref{
   \caption{\textbf{MDD hyperparameter sensitivity} (fused AUROC, $W{=}64$, L5). Every corruption's
   curve is essentially flat across \texttt{k\_pca}, \texttt{k\_nn}, and \texttt{n\_ref} (log $x$),
   with the only visible movement on the two residuals at very small \texttt{k\_nn}. Source:
-  \texttt{plot\_new\_graphs.py} (\texttt{mdd\_sensitivity.csv}).}
+  \texttt{plot\_corruption\_graphs.py} (\texttt{mdd\_sensitivity.csv}).}
   \label{fig:sensitivity}
 \end{figure}
 

@@ -87,8 +87,9 @@ experiment that feeding these corruptions to a pretrained state-of-the-art hybri
 detector (no retraining) collapses its mAP. Finally we introduce the
 Manifold-Decomposition Detector (MDD), which decomposes each frame's deviation into
 orthogonal manifold axes scored two-sided, taking the contraction corruptions above chance
-for the first time; one unsupervised, corruption-blind score reaches $\geq 0.95$ AUROC on
-four of six corruptions with sequence aggregation (two of them $1.00$). We report honest negatives --
+for the first time; one unsupervised, corruption-blind score reaches $\geq 0.85$ AUROC on
+four of six corruptions with a short, bounded-latency $64$-frame window (not whole-recording
+pooling). We report honest negatives --
 \texttt{polarity\_flip} (a network invariance) and \texttt{spatial\_dropout} (a signature
 global pooling discards) -- and frame them as an open challenge: the Achilles' heel of
 event-based perception.
@@ -150,8 +151,9 @@ failure mechanism (Figure~\ref{fig:schematic}).
         the geometric diagnosis, MDD stops collapsing $\varphi$ to one scalar and instead
         scores orthogonal, two-sided manifold axes fused by a calibrated OR
         (Section~\ref{sec:mdd}); it takes the contraction corruptions above chance for the
-        first time and reaches $\geq 0.95$ AUROC on four of six corruptions with sequence
-        aggregation. We report \texttt{polarity\_flip} and \texttt{spatial\_dropout} as
+        first time and reaches $\geq 0.85$ AUROC on four of six corruptions with a bounded
+        $64$-frame window (Section~\ref{sec:window}); whole-recording pooling only sharpens the two
+        easiest and we do not lean on it. We report \texttt{polarity\_flip} and \texttt{spatial\_dropout} as
         honest, theory-predicted residuals and release them as a community challenge
         (Section~\ref{sec:limitations}).
 \end{enumerate}
@@ -669,11 +671,13 @@ Table~\ref{tab:map-degradation} reports the result.
 \label{sec:main}
 Tables~\ref{tab:mdd-frame}--\ref{tab:mdd-seq} report fused MDD AUROC per corruption/severity,
 per-frame and per-sequence (source: \texttt{outputs/results/final\_results.csv}). One unsupervised,
-corruption-blind score takes \emph{four of six} corruptions to $\geq 0.95$ AUROC per sequence at
-severity~5 (\texttt{hot\_pixel} and \texttt{event\_flood} reach $1.00$); sequence aggregation
-rescues \texttt{event\_flood} from $0.55$ per-frame to $\mathbf{1.00}$ (the strongest
-frame$\to$sequence jump) and lifts \texttt{event\_rate\_shift} to $0.955$ and
-\texttt{temporal\_jitter} to $0.952$. The two residuals are theory-predicted dead ends.
+corruption-blind score is already strong \emph{per frame} on the detectable corruptions at
+severity~5 (\texttt{hot\_pixel} $1.00$, \texttt{temporal\_jitter} $0.85$, \texttt{event\_rate\_shift}
+$0.86$); a short, bounded-latency $64$-frame window (Section~\ref{sec:window}) additionally lifts
+\texttt{event\_flood} to $0.89$, so \emph{four of six} corruptions reach $\geq0.85$ without
+whole-recording pooling. Full-sequence aggregation (Table~\ref{tab:mdd-seq}) sharpens the two
+easiest to $1.00$, but it decides once per recording and we treat it as an optimistic upper bound,
+not the headline. The two residuals are theory-predicted dead ends.
 
 \paragraph{What aggregation does (and does not) buy.}
 Because each Gen1-C corruption is applied to the \emph{whole} sequence, every frame of a corrupted
@@ -911,8 +915,8 @@ closed-form theory of per-corruption detectability, and the Manifold-Decompositi
 follows from a dilation/contraction diagnosis. A pretrained SOTA detector collapses under these
 corruptions; $\varphi$ is a zero-added-inference-cost OOD signal that needs no second forward pass
 and provably subsumes spike-rate signals; and one unsupervised score takes four of six corruptions
-to $\geq0.95$ with sequence
-aggregation. The two residuals are theory-predicted and released as an open challenge, with a
+to $\geq0.85$ with a bounded $64$-frame window (whole-recording pooling only sharpens the two
+easiest). The two residuals are theory-predicted and released as an open challenge, with a
 concrete, biologically-grounded path -- spatial-dispersion features and adaptive neurons --
 toward closing them.
 
@@ -1124,19 +1128,32 @@ per-frame$\to$windowed$\to$per-sequence climb ($0.55\to0.89$ at $W{=}64\to1.00$)
 membrane $\varphi$ (\texttt{full\_membrane}) and its $\mu/\sigma^2/\kappa$ and per-layer slices
 (L4 carries jitter); \textbf{spike-rate} / \textbf{spike-entropy}; \textbf{ANN feature}
 (\texttt{last\_ann\_gap}) and \textbf{logits} (\texttt{head\_cls\_L0\_gap}); and \textbf{fused}
-(concat + LogReg). \todofig{Insert the representation-comparison AUROC table from
-\texttt{representation\_ablation.py}; PENDING the full-grid run.}
+(concat + LogReg). Pilot findings (Mahalanobis): $\sigma^2$ alone is the strongest single moment;
+$\mu$ alone is best for \texttt{event\_flood} (the only corruption that shifts the global mean);
+$\kappa$ is weakest overall but uniquely informative on \texttt{temporal\_jitter}; the combined
+$[\mu,\sigma^2,\kappa]$ beats every single moment on average. Across detectors on static $\varphi$
+(avg over $6{\times}5$), the MLP autoencoder leads (AUROC $0.673$, FPR@95 $0.695$), ahead of RealNVP
+($0.650$), PCA-Mahalanobis ($0.650$), Mahalanobis ($0.638$), $k$NN ($0.637$), GMM ($0.617$), OCSVM
+($0.598$) -- the AE win indicates a non-Gaussian, non-linear $\varphi$ manifold that parametric
+detectors underfit. \emph{(Provisional pilot numbers; full-grid table pending.)} \todofig{Insert the
+full representation $\times$ corruption AUROC table from \texttt{representation\_ablation.py}.}
 
 \section{Severity Monotonicity, Cross-Corruption, and What \texorpdfstring{$\varphi$}{phi} Encodes}
 \label{app:severity}
-\paragraph{Spearman $\rho$.} \texttt{severity.py}: \texttt{hot\_pixel} $\rho=+1$,
-\texttt{spatial\_dropout} $\rho=-1$ (anti-detectability). \todofig{Insert the per-corruption
-Spearman-$\rho$ table.}
-\paragraph{Cross-corruption zero-shot.} \texttt{cross\_corruption.py} holds out one corruption
-type and evaluates on it. \todofig{Insert the cross-corruption transfer matrix.}
-\paragraph{Beyond binary OOD.} \texttt{analyse\_comparisons.py} trains, on $\varphi$, a $7$-class
-corruption-type classifier (confusion matrix) and a severity regression ($R^2$). \todofig{Insert
-the confusion matrix and severity-regression $R^2$ table.}
+\paragraph{Spearman $\rho$.} \texttt{severity.py} (score vs.\ severity): \texttt{hot\_pixel} $+1$,
+\texttt{event\_flood} $+1$ (though AUROC barely moves), \texttt{polarity\_flip} $+1$,
+\texttt{event\_rate\_shift} $+1$, \texttt{temporal\_jitter} $+0.70$ ($p=0.188$, not significant at
+$n{=}5$), \texttt{spatial\_dropout} $-1$ (perfect anti-detectability). This directly validates
+Theorem~\ref{thm:score} and its GAP-pooled exception (the $-1$).
+\paragraph{Cross-corruption zero-shot.} \texttt{cross\_corruption.py} holds out one corruption type
+and evaluates on it. \todofig{Insert the cross-corruption transfer matrix.}
+\paragraph{Beyond binary OOD.} On $\varphi$ (\texttt{analyse\_comparisons.py}): a severity regression
+(Ridge) reaches $R^2>0.7$ for \texttt{hot\_pixel}/\texttt{temporal\_jitter}/\texttt{event\_rate\_shift}
+and $\approx0$ for \texttt{event\_flood}/\texttt{spatial\_dropout} (intensity is encoded continuously
+only for the detectable corruptions); a $7$-class corruption-type classifier exceeds $50\%$ top-1,
+confusing \texttt{event\_flood} and high-severity \texttt{spatial\_dropout} with clean. Conformal
+calibration on clean flags \texttt{hot\_pixel}~L5 at $>95\%$ OOD and \texttt{event\_flood} at
+$<15\%$. \emph{(Provisional pilot numbers; to be regenerated at full scale.)}
 
 \section{Temporal and Sequence Representations (and a Retracted Result)}
 \label{app:temporal}
@@ -1178,11 +1195,27 @@ from \emph{sequence aggregation} (Section~\ref{sec:window}).
   \label{tab:levers}
 \end{table}
 
+\section{MDD Hyperparameter Sensitivity}
+\label{app:sensitivity}
+To test robustness to its three free knobs, \texttt{analysis/mdd\_sensitivity.py} sweeps one at a
+time around the shipped defaults --- PCA dimensionality \texttt{k\_pca} ($64$), cosine-$k$NN
+neighbours \texttt{k\_nn} ($64$) for the RCF branch, and clean-reference size \texttt{n\_ref}
+($15000$) --- refitting the MDD for each value and re-scoring the existing $\varphi$ (no
+re-extraction), reporting fused AUROC at $W{=}1$ and the deployable $W{=}64$ window.
+\todofig{Insert the \texttt{mdd\_sensitivity.csv} curves (fused AUROC vs.\ \texttt{k\_pca} /
+\texttt{k\_nn} / \texttt{n\_ref}) once run on the cluster; the script is committed and validated.}
+
 \section{Free-Rider Validity Check}
 \label{app:freerider}
 \texttt{free\_rider\_ablation.py} compares OOD AUROC from (A) trained-SNN membrane, (B)
-random-init SNN membrane, (C) raw-input statistics; the premise requires (A)$\gg$(C).
-\todofig{Insert the trained-vs-random-vs-raw table; PENDING run -- a gating experiment.}
+random-init SNN membrane, (C) raw-input statistics; the premise of the whole paper requires
+(A)$\gg$(C) (otherwise $\varphi$ is just a re-encoding of the input). A pilot (5 sequences,
+Mahalanobis, L5) gives, on \texttt{hot\_pixel}: (A)~$\mathbf{0.998} >$ (B)~$0.822 >$ (C)~$0.716$ ---
+$+0.18$ from \emph{learning} (A$-$B) and $+0.28$ from SNN processing over raw input statistics
+(A$-$C). On \texttt{event\_flood} all three cluster near chance ($0.50$--$0.56$), consistent with
+its theoretical indistinguishability. The make-or-break premise holds in the pilot. \emph{These are
+provisional (a biased first-$N$ 5-sequence subset); the full-grid run is the remaining gating
+experiment.}
 
 \section{Spatial-Branch Mechanism Check}
 \label{app:spatial-check}

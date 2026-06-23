@@ -18,6 +18,7 @@ warnings.filterwarnings("ignore")
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+plt.rcParams.update({"font.size":14,"axes.titlesize":15,"axes.labelsize":14,"xtick.labelsize":12,"ytick.labelsize":12,"legend.fontsize":12})
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -64,7 +65,7 @@ def _winauc(cs, ts, csl, tsl, w=W64):
     return _auc(cw, tw) if cw is not None and tw is not None else float("nan")
 
 def _save(fig, name):
-    fig.tight_layout(); fig.savefig(GRAPH_DIR / name, dpi=130, bbox_inches="tight")
+    fig.tight_layout(); fig.savefig(GRAPH_DIR / name, dpi=160, bbox_inches="tight")
     plt.close(fig); print("wrote", name)
 
 
@@ -146,7 +147,7 @@ def main():
                 if c in piv: ax.plot(list(x), piv[c], "o-", color=COLORS[c], label=c, lw=2, ms=4)
             ax.set_xticks(list(x)); ax.set_xticklabels(piv.index, rotation=45); ax.axhline(0.5, ls="--", c="gray")
             ax.set_ylim(0.3, 1.02); ax.set_xlabel("aggregation window (frames)"); ax.set_ylabel("fused AUROC")
-            ax.set_title("Fused AUROC vs aggregation window (L5)"); ax.legend(fontsize=8, ncol=2)
+            ax.set_title("Fused AUROC vs aggregation window (L5)"); ax.legend(fontsize=12, ncol=2)
             _save(fig, "01_window_sweep_fused_L5.png")
         except Exception as e: print("01 fail:", e)
 
@@ -160,12 +161,12 @@ def main():
                     if db.empty: continue
                     db["wk"] = db.window.map(wmap); db = db.dropna(subset=["wk"]).sort_values("wk")
                     ax.plot(db.wk, db.auroc, "-o", lw=1.5, ms=3, label=b)
-                ax.axhline(0.5, ls="--", c="gray", lw=.8); ax.set_title(c, fontsize=10); ax.set_ylim(0.3, 1.02); ax.grid(alpha=.25)
+                ax.axhline(0.5, ls="--", c="gray", lw=.8); ax.set_title(c, fontsize=14); ax.set_ylim(0.3, 1.02); ax.grid(alpha=.25)
             tick_i = [0, 3, 7, 11, 15, 16]; tick_l = ["1", "8", "32", "128", "512", "full"]
             for ax in axes.ravel(): ax.set_xticks(tick_i); ax.set_xticklabels(tick_l)
             for ax in axes[-1]: ax.set_xlabel("aggregation window (frames)")
             for ax in axes[:, 0]: ax.set_ylabel("AUROC")
-            axes[0, 0].legend(fontsize=8)
+            axes[0, 0].legend(fontsize=12)
             fig.suptitle("Per-branch AUROC vs window, by corruption (L5)", y=1.0)
             _save(fig, "02_window_branches_L5.png")
         except Exception as e: print("02 fail:", e)
@@ -178,7 +179,7 @@ def main():
             for i in range(piv.shape[0]):
                 for j in range(piv.shape[1]):
                     v = piv.values[i, j]
-                    if np.isfinite(v): ax.text(j, i, f"{v:.2f}", ha="center", va="center", fontsize=8)
+                    if np.isfinite(v): ax.text(j, i, f"{v:.2f}", ha="center", va="center", fontsize=12)
             fig.colorbar(im, label="AUROC"); ax.set_title("Branch x corruption AUROC (L5, per-seq)")
             _save(fig, "04_branch_heatmap_L5.png")
         except Exception as e: print("04 fail:", e)
@@ -187,12 +188,12 @@ def main():
             d = sweep[(sweep.branch == "fused") & (sweep.severity == 5)]
             piv = d.pivot_table(index="corruption", columns="window", values="auroc").reindex(index=CORRS, columns=[w for w in worder if w in set(d.window)])
             fig, ax = plt.subplots(figsize=(11, 4.2)); im = ax.imshow(piv.values, cmap="RdYlGn", vmin=0.3, vmax=1, aspect="auto")
-            ax.set_xticks(range(piv.shape[1])); ax.set_xticklabels(piv.columns, rotation=45, fontsize=7)
+            ax.set_xticks(range(piv.shape[1])); ax.set_xticklabels(piv.columns, rotation=45, fontsize=11)
             ax.set_yticks(range(len(CORRS))); ax.set_yticklabels(CORRS)
             for i in range(piv.shape[0]):
                 for j in range(piv.shape[1]):
                     v = piv.values[i, j]
-                    if np.isfinite(v): ax.text(j, i, f"{v:.2f}", ha="center", va="center", fontsize=6)
+                    if np.isfinite(v): ax.text(j, i, f"{v:.2f}", ha="center", va="center", fontsize=10)
             fig.colorbar(im, label="fused AUROC"); ax.set_xlabel("window"); ax.set_title("Fused AUROC: corruption x window (L5)")
             _save(fig, "19_window_heatmap_L5.png")
         except Exception as e: print("19 fail:", e)
@@ -206,7 +207,7 @@ def main():
         ax.axhline(0.5, ls="--", c="gray"); ax.set_ylim(0.3, 1.02); ax.grid(alpha=.25)
         ax.set_xticks(sorted(df.severity.unique()))
         ax.set_xlabel("severity"); ax.set_ylabel("improved per-seq fused AUROC")
-        ax.set_title("Severity sweep (improved MDD, per-sequence)"); ax.legend(fontsize=8, ncol=2)
+        ax.set_title("Severity sweep (improved MDD, per-sequence)"); ax.legend(fontsize=12, ncol=2)
         _save(fig, "03_severity_sweep_seq.png")
     except Exception as e: print("03 fail:", e)
 
@@ -218,8 +219,8 @@ def main():
             zt = znorm(G[c][0]); bins = np.linspace(0, np.percentile(np.r_[zc, zt], 99), 60)
             ax.hist(zc, bins, density=True, alpha=.55, label="clean", color="steelblue")
             ax.hist(zt, bins, density=True, alpha=.55, label=c, color="crimson")
-            ax.set_title(c, fontsize=10); ax.set_xlabel("||z|| (PCA-64 energy)")
-        axes[0, 0].legend(fontsize=8); fig.suptitle("Membrane energy ||z||: clean vs corrupt (L5)", y=1.0)
+            ax.set_title(c, fontsize=14); ax.set_xlabel("||z|| (PCA-64 energy)")
+        axes[0, 0].legend(fontsize=12); fig.suptitle("Membrane energy ||z||: clean vs corrupt (L5)", y=1.0)
         _save(fig, "05_radial_energy_kde_L5.png")
     except Exception as e: print("05 fail:", e)
 
@@ -230,8 +231,8 @@ def main():
             ax.hist(dc, bins, density=True, alpha=.55, label="clean", color="steelblue")
             ax.hist(dt, bins, density=True, alpha=.55, label=c, color="darkorange")
             ax.axvline(np.median(dc), c="steelblue", ls="--"); ax.axvline(np.median(dt), c="darkorange", ls="--")
-            ax.set_title(c, fontsize=10); ax.set_xlabel("Mahalanobis d^2")
-        axes[0, 0].legend(fontsize=8); fig.suptitle("Mahalanobis d^2: contractions sit at SMALLER d^2 (inversion) (L5)", y=1.0)
+            ax.set_title(c, fontsize=14); ax.set_xlabel("Mahalanobis d^2")
+        axes[0, 0].legend(fontsize=12); fig.suptitle("Mahalanobis d^2: contractions sit at SMALLER d^2 (inversion) (L5)", y=1.0)
         _save(fig, "06_mahalanobis_d2_hist_L5.png")
     except Exception as e: print("06 fail:", e)
 
@@ -241,8 +242,8 @@ def main():
         for ax, c in zip(axes.ravel(), CORRS):
             Zt = project(G[c][0])[:, :2]
             ax.scatter(Zc[:, 0], Zc[:, 1], s=4, alpha=.3, color="steelblue", label="clean")
-            ax.scatter(Zt[:, 0], Zt[:, 1], s=4, alpha=.3, color="crimson", label=c); ax.set_title(c, fontsize=10)
-        axes[0, 0].legend(fontsize=8, markerscale=2); fig.suptitle("Shared clean-PCA(2): clean vs corrupt (L5)", y=1.0)
+            ax.scatter(Zt[:, 0], Zt[:, 1], s=4, alpha=.3, color="crimson", label=c); ax.set_title(c, fontsize=14)
+        axes[0, 0].legend(fontsize=12, markerscale=2); fig.suptitle("Shared clean-PCA(2): clean vs corrupt (L5)", y=1.0)
         _save(fig, "07_pca_scatter_shared_L5.png")
     except Exception as e: print("07 fail:", e)
 
@@ -255,7 +256,7 @@ def main():
             Ct = project(G[c][0])[:, :2].mean(0)
             ax.annotate("", xy=Ct, xytext=Cc, arrowprops=dict(arrowstyle="->", color=COLORS[c], lw=2))
             ax.scatter(*Ct, color=COLORS[c], s=40, label=c, zorder=6)
-        ax.set_xlabel("PC1"); ax.set_ylabel("PC2"); ax.legend(fontsize=8, ncol=2)
+        ax.set_xlabel("PC1"); ax.set_ylabel("PC2"); ax.legend(fontsize=12, ncol=2)
         ax.set_title("Clean->corrupt centroid drift (shared PCA, L5)")
         _save(fig, "08_pca_drift_arrows_L5.png")
     except Exception as e: print("08 fail:", e)
@@ -268,10 +269,10 @@ def main():
                 groups.append((f'L{spec["idx"]+1}:{mn}', list(range(spec["phi_start"]+a, spec["phi_start"]+b))))
         M = np.array([[np.abs(L5[c]["shift"][cs]).mean() for (_, cs) in groups] for c in CORRS])
         fig, ax = plt.subplots(figsize=(11, 4.2)); im = ax.imshow(np.log10(M + 1e-3), cmap="magma", aspect="auto")
-        ax.set_xticks(range(len(groups))); ax.set_xticklabels([g[0] for g in groups], rotation=45, fontsize=7, ha="right")
+        ax.set_xticks(range(len(groups))); ax.set_xticklabels([g[0] for g in groups], rotation=45, fontsize=11, ha="right")
         ax.set_yticks(range(len(CORRS))); ax.set_yticklabels(CORRS)
         for i in range(M.shape[0]):
-            for j in range(M.shape[1]): ax.text(j, i, f"{M[i, j]:.2f}", ha="center", va="center", fontsize=6, color="w")
+            for j in range(M.shape[1]): ax.text(j, i, f"{M[i, j]:.2f}", ha="center", va="center", fontsize=10, color="w")
         fig.colorbar(im, label="log10 mean |standardized shift|"); ax.set_title("Channel-mean shift by layer/moment (log) — residuals ~0")
         _save(fig, "09_corruption_fingerprint_heatmap.png")
     except Exception as e: print("09 fail:", e)
@@ -280,10 +281,10 @@ def main():
         V = np.array([L5[c]["shift"] for c in CORRS]); Vn = V / (np.linalg.norm(V, axis=1, keepdims=True) + 1e-9)
         S = Vn @ Vn.T
         fig, ax = plt.subplots(figsize=(6, 5)); im = ax.imshow(S, cmap="RdBu_r", vmin=-1, vmax=1)
-        ax.set_xticks(range(len(CORRS))); ax.set_xticklabels(CORRS, rotation=45, ha="right", fontsize=8)
-        ax.set_yticks(range(len(CORRS))); ax.set_yticklabels(CORRS, fontsize=8)
+        ax.set_xticks(range(len(CORRS))); ax.set_xticklabels(CORRS, rotation=45, ha="right", fontsize=12)
+        ax.set_yticks(range(len(CORRS))); ax.set_yticklabels(CORRS, fontsize=12)
         for i in range(len(CORRS)):
-            for j in range(len(CORRS)): ax.text(j, i, f"{S[i, j]:.2f}", ha="center", va="center", fontsize=7)
+            for j in range(len(CORRS)): ax.text(j, i, f"{S[i, j]:.2f}", ha="center", va="center", fontsize=11)
         fig.colorbar(im, label="cosine"); ax.set_title("Corruption similarity (mean-shift direction)")
         _save(fig, "10_corruption_similarity_matrix.png")
     except Exception as e: print("10 fail:", e)
@@ -296,7 +297,7 @@ def main():
         Z = LDA(n_components=2).fit_transform(np.vstack(X), y)
         fig, ax = plt.subplots(figsize=(7.5, 6)); y = np.array(y)
         for i, nm in enumerate(lab): ax.scatter(Z[y == i, 0], Z[y == i, 1], s=5, alpha=.4, label=nm)
-        ax.legend(fontsize=8, markerscale=2); ax.set_xlabel("LD1"); ax.set_ylabel("LD2")
+        ax.legend(fontsize=12, markerscale=2); ax.set_xlabel("LD1"); ax.set_ylabel("LD2")
         ax.set_title("LDA(phi) excl. hot_pixel/event_flood — residual structure")
         _save(fig, "11_lda_scatter.png")
     except Exception as e: print("11 fail:", e)
@@ -315,7 +316,7 @@ def main():
         x = np.arange(len(CORRS)); w = 0.38; fig, ax = plt.subplots(figsize=(9, 5))
         ax.bar(x - w/2, d.baseline_seq, w, label="baseline (max)", color="#9aa0a6")
         ax.bar(x + w/2, d.improved_seq, w, label=f"improved (max-{ALPHA}*med)", color="#1a73e8")
-        for i, im in enumerate(d.improved_seq): ax.text(i + w/2, im + 0.01, f"{im:.2f}", ha="center", fontsize=7)
+        for i, im in enumerate(d.improved_seq): ax.text(i + w/2, im + 0.01, f"{im:.2f}", ha="center", fontsize=11)
         ax.axhline(0.5, ls="--", c="gray"); ax.set_ylim(0.3, 1.05); ax.set_xticks(x)
         ax.set_xticklabels(CORRS, rotation=30, ha="right"); ax.set_ylabel("per-seq AUROC (L5)")
         ax.legend(); ax.set_title("Baseline vs improved MDD (L5, per-sequence)")
@@ -332,7 +333,7 @@ def main():
             ax.plot(alphas, ys, "o-", color=COLORS[c], label=c, lw=2, ms=3)
         ax.axvline(ALPHA, ls=":", c="k", label=f"default a={ALPHA}")
         ax.set_xlabel("studentization a (fused = max - a*median)"); ax.set_ylabel("per-seq AUROC (L5)")
-        ax.set_title("Fusion a-tradeoff: dropout up, polarity down"); ax.legend(fontsize=8); ax.grid(alpha=.3)
+        ax.set_title("Fusion a-tradeoff: dropout up, polarity down"); ax.legend(fontsize=12); ax.grid(alpha=.3)
         _save(fig, "16_alpha_tradeoff.png")
     except Exception as e: print("16 fail:", e)
 
@@ -347,7 +348,7 @@ def main():
         dd = pd.DataFrame(dd); x = np.arange(len(CORRS)); w = 0.2; fig, ax = plt.subplots(figsize=(9, 5))
         for i, nm in enumerate(combs): ax.bar(x + (i - 1.5) * w, dd[nm].reindex(CORRS), w, label=nm)
         ax.axhline(0.5, ls="--", c="gray"); ax.set_xticks(x); ax.set_xticklabels(CORRS, rotation=30, ha="right")
-        ax.set_ylabel("per-seq AUROC (L5)"); ax.legend(fontsize=7, ncol=2); ax.set_ylim(0.3, 1.05)
+        ax.set_ylabel("per-seq AUROC (L5)"); ax.legend(fontsize=11, ncol=2); ax.set_ylim(0.3, 1.05)
         ax.set_title("Fusion combiners across corruptions (L5)")
         _save(fig, "17_fusion_combiners.png")
     except Exception as e: print("17 fail:", e)
@@ -361,7 +362,7 @@ def main():
             s = np.r_[clean_fused_i, L5[c]["fused_i"]]; fpr, tpr, _ = roc_curve(y, s)
             ax.plot(fpr, tpr, color=COLORS[c], lw=2, label=f"{c} ({auroc_fpr95(y, s)[0]:.2f})")
         ax.plot([0, 1], [0, 1], "--", c="gray"); ax.set_xlabel("FPR"); ax.set_ylabel("TPR")
-        ax.set_title("ROC: improved fused, clean vs corrupt (L5, per-frame)"); ax.legend(fontsize=8)
+        ax.set_title("ROC: improved fused, clean vs corrupt (L5, per-frame)"); ax.legend(fontsize=12)
         _save(fig, "18_roc_curves_L5.png")
     except Exception as e: print("18 fail:", e)
 
@@ -390,7 +391,7 @@ def main():
                 v = G[key][1][:, lo:hi].mean(1); bins = np.linspace(np.percentile(v, 1), np.percentile(v, 99), 60)
                 ax.hist(v, bins, density=True, alpha=.5, label=lbl, color=col)
             ax.set_title(nm); ax.set_xlabel(f"per-frame mean {nm}")
-        axes[0].legend(fontsize=8); fig.suptitle("phi_spatial: flood explodes spatial_var, dropout barely moves it", y=1.02)
+        axes[0].legend(fontsize=12); fig.suptitle("phi_spatial: flood explodes spatial_var, dropout barely moves it", y=1.02)
         _save(fig, "21_phi_spatial_kde.png")
     except Exception as e: print("21 fail:", e)
 
@@ -405,7 +406,7 @@ def main():
         for i in range(piv.shape[0]):
             for j in range(piv.shape[1]):
                 v = piv.values[i, j]
-                if np.isfinite(v): ax.text(j, i, f"{v:+.3f}", ha="center", va="center", fontsize=7)
+                if np.isfinite(v): ax.text(j, i, f"{v:+.3f}", ha="center", va="center", fontsize=11)
         fig.colorbar(im, label="improved - baseline (seq)"); ax.set_title("Improvement by corruption x severity (per-seq)")
         _save(fig, "22_improvement_by_severity.png")
     except Exception as e: print("22 fail:", e)
@@ -420,9 +421,9 @@ def main():
             dc = df[df.corruption == c].sort_values("severity")
             for col, lbl, st in gran:
                 ax.plot(dc.severity, dc[col], st, lw=2, ms=5, label=lbl)
-            ax.axhline(0.5, ls="--", c="gray", lw=.8); ax.set_title(c, fontsize=11); ax.set_ylim(0.4, 1.02)
+            ax.axhline(0.5, ls="--", c="gray", lw=.8); ax.set_title(c, fontsize=15); ax.set_ylim(0.4, 1.02)
             ax.set_xticks(sorted(df.severity.unique()))
-        axes[0, 0].legend(fontsize=9)
+        axes[0, 0].legend(fontsize=13)
         for ax in axes[-1]: ax.set_xlabel("severity")
         for ax in axes[:, 0]: ax.set_ylabel("AUROC (improved MDD)")
         fig.suptitle("Best MDD results: AUROC vs severity at W=1 / W=64 / full-sequence, per corruption", y=1.0)

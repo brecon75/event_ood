@@ -17,6 +17,7 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+plt.rcParams.update({"font.size":13,"axes.titlesize":14,"axes.labelsize":13,"xtick.labelsize":11,"ytick.labelsize":12,"legend.fontsize":11})
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vmem_benchmark import benchmark_config as cfg
@@ -43,16 +44,16 @@ def detectability_summary(sev=5):
         vals = [d.loc[c, col] if c in d.index else np.nan for c in ORDER]
         ax.bar(x + (i - 1) * w, vals, w, label=nm, color=cl, edgecolor="white")
     ax.axhline(0.5, ls="--", lw=0.8, color="grey")
-    ax.text(len(ORDER) - 0.5, 0.505, "chance", fontsize=7, color="grey", va="bottom", ha="right")
+    ax.text(len(ORDER) - 0.5, 0.505, "chance", fontsize=11, color="grey", va="bottom", ha="right")
     ax.axhline(0.85, ls=":", lw=0.8, color="darkgreen")
-    ax.text(len(ORDER) - 0.5, 0.855, "solved (0.85)", fontsize=7, color="darkgreen", va="bottom", ha="right")
-    ax.set_xticks(x); ax.set_xticklabels([LBL[c] for c in ORDER], fontsize=8)
+    ax.text(len(ORDER) - 0.5, 0.855, "solved (0.85)", fontsize=11, color="darkgreen", va="bottom", ha="right")
+    ax.set_xticks(x); ax.set_xticklabels([LBL[c] for c in ORDER], fontsize=12)
     ax.set_ylim(0.3, 1.02); ax.set_ylabel("fused AUROC (L%d)" % sev)
-    ax.set_title("Detection by decision granularity: four solved, two residuals", fontsize=10)
-    ax.legend(fontsize=8, ncol=3, loc="lower center", frameon=False)
+    ax.set_title("Detection by decision granularity: four solved, two residuals", fontsize=14)
+    ax.legend(fontsize=12, ncol=3, loc="lower center", frameon=False)
     fig.tight_layout()
     out = GRAPHS / "25_detectability_summary_L5.png"
-    fig.savefig(out, dpi=160); plt.close(fig)
+    fig.savefig(out, dpi=170); plt.close(fig)
     print("wrote", out)
 
 
@@ -71,16 +72,16 @@ def sensitivity(sev=5, window=64):
                 continue
             ax.plot(cc.value, cc.auroc, "-o", ms=3, lw=1.3, color=cmap(j % 10),
                     label=c.replace("_", " "))
-        ax.set_xscale("log"); ax.set_title(title, fontsize=9)
+        ax.set_xscale("log"); ax.set_title(title, fontsize=13)
         ax.axhline(0.5, ls="--", lw=0.7, color="grey")
         ax.grid(alpha=0.25)
     axes[0].set_ylabel("fused AUROC (W=%d, L%d)" % (window, sev))
     axes[0].set_ylim(0.45, 1.02)
-    axes[-1].legend(fontsize=6.5, loc="center right", frameon=False)
-    fig.suptitle("MDD is insensitive to its hyperparameters", fontsize=10)
+    axes[-1].legend(fontsize=10, loc="center right", frameon=False)
+    fig.suptitle("MDD is insensitive to its hyperparameters", fontsize=14)
     fig.tight_layout(rect=[0, 0, 1, 0.95])
     out = GRAPHS / "24_sensitivity_L5.png"
-    fig.savefig(out, dpi=160); plt.close(fig)
+    fig.savefig(out, dpi=170); plt.close(fig)
     print("wrote", out)
 
 

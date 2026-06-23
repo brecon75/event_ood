@@ -299,8 +299,14 @@ def main():
 
     input_dir = cfg.GEN1_ROOT / cfg.SPLIT
     if not input_dir.exists():
-        print(f"Error: '{cfg.SPLIT}' split not found in {cfg.GEN1_ROOT}")
-        return
+        # Allow --gen1-root to point directly AT the test split (test-only data):
+        # either it's named like the split, or it already holds the sequences.
+        if cfg.GEN1_ROOT.name == cfg.SPLIT or list(cfg.GEN1_ROOT.glob("*/labels_v2/labels.npz")):
+            input_dir = cfg.GEN1_ROOT
+        else:
+            print(f"Error: '{cfg.SPLIT}' split not found in {cfg.GEN1_ROOT} "
+                  f"(pass a dir containing {cfg.SPLIT}/, or the {cfg.SPLIT} dir itself)")
+            return
 
     label_files = sorted(input_dir.glob("*/labels_v2/labels.npz"))
     seq_dirs = [p.parent.parent for p in label_files][:max_seq]

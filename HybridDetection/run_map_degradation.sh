@@ -50,6 +50,12 @@ elif [ -d "${ROOT_DIR}/gen1" ]; then
 else
   DATA_DIR="${ROOT_DIR}/../gen1"
 fi
+# The data module appends '/test'. Only the test split is needed (train/val are
+# never loaded). If --test points AT the test dir itself (named 'test'), step up
+# one level so <DATA_DIR>/test resolves -- supports a test-only dataset.
+if [ ! -d "${DATA_DIR}/test" ] && [ "$(basename "$DATA_DIR")" = "test" ]; then
+  DATA_DIR="$(dirname "$DATA_DIR")"
+fi
 CHECKPOINT="${CHECKPOINT:-${ROOT_DIR}/gen1_mAP36.ckpt}"
 EXPERIMENT_CFG="${EXPERIMENT_CFG:-no_lstm}"
 GPU_ID="${GPU_ID:-0}"

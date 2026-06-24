@@ -1,0 +1,192 @@
+import torch
+import numpy as np
+from pathlib import Path
+from tqdm import tqdm
+
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from vmem_benchmark import benchmark_config as cfg
+from analysis.vmem_scorers import mahalanobis_scorer
+from analysis.vmem_utils import (
+    slice_phi_layer, split_train_eval, load_phi_seq_lens, load_pt, materialize_f32,
+)
+
+
+def _load_run(run_name):
+    """Load one run's representations (phi + margin-hist + trajectory-latent +
+    temporal-phi) on demand. Returns None if the run has no phi.
+
+    Loading ONE run at a time (instead of all ~31 at once) is the whole point:
+    the eager version held every run's phi + margin-hist + temporal features in
+    RAM simultaneously, which OOMs a cluster node at full scale."""
+    phi_path = cfg.PHI_DIR / f"{run_name}.pt"
+    if not phi_path.exists():
+        return None
+    # mmap + materialize only phi: the sibling phi_spatial is not read here.
+    feats = {"membrane_stats": materialize_f32(load_pt(phi_path)["phi"])}
+
+    mh_path = cfg.OUTPUT_DIR / "features/margin_hist" / f"{run_name}.pt"
+    if mh_path.exists():
+        feats["membrane_margin_hist"] = torch.load(
+            mh_path, weights_only=True, map_location="cpu")["margin_hist"].numpy()
+
+    tl_path = cfg.OUTPUT_DIR / "features/trajectory_latent" / f"{run_name}.pt"
+    if tl_path.exists():
+        feats["membrane_temporal_latent"] = torch.load(
+            tl_path, weights_only=True, map_location="cpu")["trajectory_latent"].numpy()
+
+    tphi_path = cfg.TEMPORAL_PHI_DIR / f"{run_name}.pt"
+    tf = None
+    if tphi_path.exists():
+        try:
+            tf = torch.load(tphi_path, weights_only=True,
+                            map_location="cpu")["temporal_phi"].float().numpy()
+        except Exception:
+            pass
+    if tf is None:
+        from analysis.vmem_utils import load_traj_as_temporal_phi
+        tf = load_traj_as_temporal_phi(run_name)
+    if tf is not None:
+        feats["membrane_temporal"] = tf
+
+    return feats
+
+def align_and_concat(feat_dict, keys, run_name=""):
+    """
+    Concatenate representations. If row counts mismatch, slice to the minimum
+    length. All representations are saved in the same frame order, so the
+    first min_len rows of each refer to the same frames.
+    """
+    present = [k for k in keys if k in feat_dict]
+    if not present:
+        return None
+    lens = {k: feat_dict[k].shape[0] for k in present}
+    min_len, max_len = min(lens.values()), max(lens.values())
+    if min_len < max_len:
+        print(f"  [!] {run_name}: fusing representations with mismatched row "
+              f"counts {lens}; truncating to {min_len} frames. If this is much "
+              f"smaller than the full run, a temporal feature file is likely "
+              f"missing (re-run extract_offline_features.py).")
+    return np.concatenate([feat_dict[k][:min_len] for k in present], axis=1)
+
+
+def main():
+    print("Running Trainable Layer Fusion and Unified Representation Extraction...")
+    
+    out_dir = cfg.OUTPUT_DIR / "features/fused"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    run_names = sorted(f.stem for f in cfg.PHI_DIR.glob("*.pt"))
+    if "clean" not in run_names:
+        print("Error: clean features not found.")
+        return
+
+    # Load clean ONCE (its features fit all fusion weights below, and clean is
+    # reused when its turn comes in the run loop so it isn't read twice).
+    print("Loading clean features for fusion-weight fitting...")
+    clean_feats = _load_run("clean")
+
+    # Task C: Layer Attention Fusion — unsupervised weights from clean data
+    # only: each layer is weighted by the inverse of its clean feature
+    # variance (stable layers get more weight), normalized to sum to 1.
+    # Weights are estimated on the clean TRAIN split so held-out clean frames
+    # stay untouched for downstream evaluation.
+    print("Computing Layer Fusion weights (Task C)...")
+    clean_phi = clean_feats["membrane_stats"]
+    clean_phi_train, _ = split_train_eval(clean_phi, seq_lens=load_phi_seq_lens("clean"))
+
+    alpha = []
+    for i in range(4):
+        layer_feat = slice_phi_layer(clean_phi_train, i)
+        if layer_feat.shape[1] > 0:
+            var = layer_feat.var(axis=0).sum()
+            alpha.append(1.0 / (var + 1e-8))
+        else:
+            alpha.append(0)
+
+    alpha = np.array(alpha)
+    alpha = alpha / alpha.sum()
+    print(f"Learned Layer Attention Weights: {alpha}")
+
+    # Task E: Per-Layer Mahalanobis Aggregation
+    # Learn weights S = sum(w_i * score_i) on the clean train split.
+    print("Computing Per-Layer Mahalanobis weights (Task E)...")
+    layer_scorers = []
+    clean_layer_scores = []
+
+    for i in range(4):
+        layer_feat = slice_phi_layer(clean_phi_train, i)
+        if layer_feat.shape[1] > 0:
+            scorer = mahalanobis_scorer(layer_feat)
+            # Store the TRUE layer index with the scorer: if any layer is skipped
+            # (width 0), the list index would no longer equal the layer index.
+            layer_scorers.append((i, scorer))
+            score_i = scorer(layer_feat)
+            clean_layer_scores.append(score_i)
+
+    w = None
+    if clean_layer_scores:
+        cls_matrix = np.stack(clean_layer_scores, axis=1) # (N, L)
+        # Weight by inverse variance of clean scores
+        score_var = cls_matrix.var(axis=0)
+        w = 1.0 / (score_var + 1e-8)
+        w = w / w.sum()
+        print(f"Learned Mahalanobis Score Weights: {w}")
+    
+    # Process all runs — load each on demand and free it after saving, so peak
+    # RAM stays at ~clean + one run instead of all ~31 runs at once.
+    print(f"Fusing {len(run_names)} runs...")
+    for run_name in tqdm(run_names, desc="Fusing runs"):
+        run_feats = clean_feats if run_name == "clean" else _load_run(run_name)
+        if run_feats is None:
+            continue
+        phi = run_feats["membrane_stats"]
+
+        # Apply layer fusion to phi (Task C)
+        layer_fused_stats = []
+        for i in range(4):
+            layer_feat = slice_phi_layer(phi, i)
+            if layer_feat.shape[1] > 0:
+                layer_fused_stats.append(layer_feat * alpha[i])
+        
+        if layer_fused_stats:
+            layer_fused_stats = np.concatenate(layer_fused_stats, axis=1)
+            run_feats["layer_fused_stats"] = layer_fused_stats
+            
+        # Apply per-layer mahalanobis (Task E) — use the scorer's TRUE layer index.
+        run_layer_scores = []
+        for layer_i, scorer in layer_scorers:
+            layer_feat = slice_phi_layer(phi, layer_i)
+            if layer_feat.shape[1] > 0:
+                run_layer_scores.append(scorer(layer_feat))
+        
+        if run_layer_scores and w is not None:
+            rls_matrix = np.stack(run_layer_scores, axis=1) # (N, L)
+            layer_score_fusion = (rls_matrix * w).sum(axis=1)
+            run_feats["layer_score_fusion"] = layer_score_fusion
+
+        # Task D: Unified Membrane Representation (membrane_fused).
+        # membrane_temporal (handcrafted temporal phi) already includes the
+        # threshold-margin features.
+        keys_to_fuse = ["membrane_stats", "membrane_margin_hist", "membrane_temporal_latent"]
+        if "membrane_temporal" in run_feats:
+            keys_to_fuse.append("membrane_temporal")
+
+        membrane_fused = align_and_concat(run_feats, keys_to_fuse, run_name=run_name)
+        if membrane_fused is not None:
+            run_feats["membrane_fused"] = membrane_fused
+            
+        # Save fused features
+        torch.save(
+            {
+                "layer_fused_stats": torch.from_numpy(run_feats.get("layer_fused_stats")) if run_feats.get("layer_fused_stats") is not None else None,
+                "layer_score_fusion": torch.from_numpy(run_feats.get("layer_score_fusion")) if run_feats.get("layer_score_fusion") is not None else None,
+                "membrane_fused": torch.from_numpy(run_feats.get("membrane_fused")) if run_feats.get("membrane_fused") is not None else None
+            },
+            out_dir / f"{run_name}.pt"
+        )
+        
+    print("Fusion complete.")
+
+if __name__ == "__main__":
+    main()

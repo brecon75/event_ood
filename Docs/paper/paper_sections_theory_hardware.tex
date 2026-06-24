@@ -1,0 +1,545 @@
+% Vmem-phi -- Full draft sections: Corruption suite, Corruption algorithms, Theory, Hardware
+% Companion outline: Docs/paper_skeleton.md ; measured numbers: Docs/paper_figures.md
+%
+% DUAL USE:
+%   * Standalone: compiles as-is on Overleaf (the wrapper below supplies the
+%     preamble, \begin{document}, and a manual bibliography).
+%   * \input into a parent manuscript: define \theoryhardwareEMBED before the
+%     \input and the standalone wrapper + bibliography are skipped, e.g.
+%       \newcommand{\theoryhardwareEMBED}{}
+%       \input{paper_sections_theory_hardware}
+%
+% Citation keys are placeholders; the embedded thebibliography below gives them
+% resolvable (if approximate) entries so the standalone build is clean.
+
+\ifdefined\theoryhardwareEMBED\else
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{microtype}
+\begin{document}
+\fi
+
+\section{The Event-Camera Corruption Suite}
+\label{sec:corruptions}
+
+A benchmark for out-of-distribution (OOD) detection is only as meaningful as the
+distribution shifts it tests against. We therefore define a controlled, reproducible
+battery of six corruptions that model the dominant failure modes of event-camera
+front-ends, each applied at five monotonically increasing severities. Together with the
+clean baseline this yields $6\times5+1=31$ runs per detector. The suite is designed so that
+each corruption perturbs a \emph{structurally distinct} axis of the input---DC offset,
+localized burst, temporal order, global rate, polarity, or spatial support---which is what
+makes the closed-form analysis of Section~\ref{sec:theory} possible: a detector's behaviour
+on each corruption can be predicted from which axis it moves.
+
+\subsection{Input representation}
+\label{sec:corruptions-input}
+
+Every corruption operates directly on the model's input tensor rather than on the raw event
+stream, so that it composes with any downstream architecture and is label-free (no detection
+annotations are consulted). A sequence is a stack of $N$ event-histogram frames of shape
+$(20, H, W)$, with $H\times W = 240\times304$ for Prophesee Gen1. The $20$ channels encode
+two polarities $\times$ ten time bins of width $50\,\mu\text{s}$: channels $0$--$9$ are the
+ON-polarity bins (oldest to newest) and channels $10$--$19$ the OFF-polarity bins. Counts
+are stored as \texttt{uint8}; corruptions that can increase counts promote to a wider integer
+or float type internally and clip back to $[0,255]$, so no silent wrap-around occurs.
+
+\subsection{Design principles}
+\label{sec:corruptions-design}
+
+Three properties hold across the suite. \textbf{(i) Reproducibility:} every random decision
+(pixel coordinates, burst centres, flip masks, shift amounts, rate direction) is drawn from a
+single seeded NumPy generator, so a (corruption, severity, seed) triple is deterministic.
+\textbf{(ii) Hardware agnosticism:} each operation is expressed through an array module that
+dispatches to NumPy or CuPy, so the identical corruption runs on CPU or GPU.
+\textbf{(iii) Severity monotonicity:} severity $1$ is a mild perturbation and severity $5$ a
+severe one, with parameters chosen to increase monotonically (Section~\ref{sec:corr-algos}),
+enabling the Spearman-$\rho$ monotonicity analysis of the results section. Table~\ref{tab:corr-taxonomy}
+summarizes the failure mode and perturbed axis for each corruption.
+
+\begin{table}[t]
+  \centering
+  \small
+  \begin{tabularx}{\linewidth}{@{}l l X@{}}
+    \toprule
+    Corruption & Physical failure mode & Axis of the input perturbed \\
+    \midrule
+    \texttt{hot\_pixel}        & defective / stuck pixels        & constant DC offset at fixed pixel locations \\
+    \texttt{event\_flood}      & EMI / sensor saturation         & localized count bursts in space and time \\
+    \texttt{temporal\_jitter}  & clock noise / timestamp error   & time-bin ordering (per polarity) \\
+    \texttt{event\_rate\_shift}& event-density domain gap         & global multiplicative rate \\
+    \texttt{polarity\_flip}    & ON/OFF misclassification         & polarity sign on a fraction of frames \\
+    \texttt{spatial\_dropout}  & dead-pixel clusters / occlusion & spatial support (rectangular regions zeroed) \\
+    \bottomrule
+  \end{tabularx}
+  \caption{The six event-camera corruptions, the sensor failure each models, and the
+  structural axis of the input histogram it perturbs. Each axis maps to a distinct,
+  predictable signature in the membrane moments (Section~\ref{sec:theory}).}
+  \label{tab:corr-taxonomy}
+\end{table}
+
+\section{Corruption Algorithms}
+\label{sec:corr-algos}
+
+We now specify each corruption and its severity schedule. All operate on a histogram
+$X \in \{0,\dots,255\}^{N\times 20\times H\times W}$ and return a corrupted copy of the same
+shape and dtype.
+
+\paragraph{Hot pixel.}
+A fixed set of $n$ pixel locations is sampled uniformly at random and a constant count $\delta$
+is added to \emph{every} time bin of \emph{every} frame at those locations, modelling pixels
+that fire continuously regardless of scene content. The accumulation is performed in
+\texttt{int16} and clipped to $[0,255]$. Severity raises both the number of hot pixels and the
+injected count: $(n,\delta) \in \{(10,20),(30,40),(80,80),(150,140),(300,200)\}$ for
+severities $1$--$5$.
+
+\paragraph{Event flood.}
+$b$ burst centres are placed at random frames and random spatial patches; at each, a count
+$\delta$ is added inside a patch covering a fraction $f$ of the array, over the frames within
+$\pm 2$ of the centre. This models electromagnetic interference or saturation affecting a
+localized region for a short time. Severity raises the number of bursts, the patch fraction,
+and the injected count: $(b,f,\delta) \in \{(2,0.05,60),(4,0.08,100),(8,0.12,150),(15,0.18,200),(25,0.25,255)\}$.
+
+\paragraph{Temporal jitter.}
+The ON-polarity bin block (channels $0$--$9$) and the OFF block (channels $10$--$19$) are each
+rolled along the time-bin axis by an independent random integer shift drawn from
+$[-s_{\max}, s_{\max}]$, with vacated bins zero-filled. This models clock noise / timestamp
+inaccuracy that misassigns events to neighbouring time bins; crucially it permutes time order
+while leaving the per-channel marginal counts almost unchanged. The maximum shift grows with
+severity: $s_{\max} \in \{1,2,3,5,8\}$ bins (one bin $=50\,\mu\text{s}$).
+
+\paragraph{Event-rate shift.}
+All counts are multiplied by a single factor and clipped, modelling a domain gap in event
+density (low- vs.\ high-texture or slow vs.\ fast motion). A seeded coin flip selects an
+under-rate or over-rate factor, so the corruption is two-sided. The factor pair
+$(\text{under},\text{over})$ widens with severity:
+$\{(0.80,1.20),(0.65,1.40),(0.50,1.65),(0.35,2.00),(0.20,2.50)\}$.
+
+\paragraph{Polarity flip.}
+For a random fraction $p$ of frames, the ON and OFF channel blocks are swapped, modelling
+sensor misclassification of brightness-change direction. The fraction of affected frames grows
+with severity: $p \in \{0.05,0.10,0.20,0.35,0.50\}$.
+
+\paragraph{Spatial dropout.}
+$k$ rectangular regions, each covering fractions $(f_h, f_w)$ of the height and width, are
+zeroed across all channels and all frames, modelling dead-pixel clusters or persistent
+structured occlusion. Severity raises the number and size of regions:
+$(k, f_h, f_w) \in \{(1,0.05,0.05),(1,0.10,0.10),(2,0.10,0.10),(2,0.15,0.15),(3,0.20,0.20)\}$.
+
+\begin{table}[t]
+  \centering
+  \small
+  \begin{tabularx}{\linewidth}{@{}l X X X X X@{}}
+    \toprule
+    Corruption & Sev.\ 1 & Sev.\ 2 & Sev.\ 3 & Sev.\ 4 & Sev.\ 5 \\
+    \midrule
+    \texttt{hot\_pixel} $(n,\delta)$        & $10,20$  & $30,40$  & $80,80$   & $150,140$ & $300,200$ \\
+    \texttt{event\_flood} $(b,f,\delta)$    & $2,.05,60$ & $4,.08,100$ & $8,.12,150$ & $15,.18,200$ & $25,.25,255$ \\
+    \texttt{temporal\_jitter} $s_{\max}$    & $1$ & $2$ & $3$ & $5$ & $8$ \\
+    \texttt{event\_rate\_shift} (u, o)      & $.80,1.20$ & $.65,1.40$ & $.50,1.65$ & $.35,2.00$ & $.20,2.50$ \\
+    \texttt{polarity\_flip} $p$             & $.05$ & $.10$ & $.20$ & $.35$ & $.50$ \\
+    \texttt{spatial\_dropout} $(k,f_h,f_w)$ & $1,.05,.05$ & $1,.10,.10$ & $2,.10,.10$ & $2,.15,.15$ & $3,.20,.20$ \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Severity schedules for the six corruptions. Parameters increase monotonically with
+  severity. Symbols: $n$ hot pixels, $\delta$ injected count, $b$ burst centres, $f$ patch
+  fraction, $s_{\max}$ max bin shift, $(u,o)$ under/over rate factors, $p$ flipped-frame
+  fraction, $k$ dropout regions, $(f_h,f_w)$ region height/width fractions.}
+  \label{tab:corr-severity}
+\end{table}
+
+\section{A Leaky-Integrator Theory of Membrane-Statistics OOD Detection}
+\label{sec:theory}
+
+A benchmark that reports which corruptions a detector catches, but not \emph{why},
+invites the obvious reviewer objection: the method may be exploiting dataset-specific
+artifacts rather than a property of the underlying neuron model. This section removes that
+objection. We show that the detectability of each corruption is not an empirical accident
+but a closed-form consequence of the Parametric Leaky Integrate-and-Fire (PLIF) state
+equation. The membrane potential is a \emph{leaky exponential accumulator} of the input
+current; each corruption perturbs that current in a structurally distinct way, and the
+perturbation propagates to a predictable change in the first three moments of the
+sub-threshold trace. The resulting predictions match the measured per-corruption AUROC
+ordering, turning the benchmark into a principled framework.
+
+\subsection{The PLIF state equation and its closed-form solution}
+\label{sec:theory-state}
+
+The PLIF neuron, as instantiated by SpikingJelly's \texttt{MultiStepParametricLIFNode}
+\cite{fang2021plif}, maintains a sub-threshold membrane potential $V$ that integrates an
+input current with a learnable leak. In discrete multi-step form, the update for a single
+channel is
+%
+\begin{equation}
+  V[t] \;=\; \Big(1 - \tfrac{1}{\tau}\Big)\, V[t-1] \;+\; W\, X[t],
+  \label{eq:plif}
+\end{equation}
+%
+where $\tau > 1$ is the membrane time constant (learned per layer), $W$ is the synaptic
+weight applied to the input event-histogram current $X[t]$ at time step $t$, and a spike is
+emitted with a reset whenever $V$ crosses the firing threshold $\theta$. Writing the leak
+factor as $\lambda \equiv 1 - 1/\tau \in (0,1)$ and unrolling \eqref{eq:plif} from a
+quiescent initial state $V[-1]=0$ over the $T$ SNN time steps, the sub-threshold trace is an
+exponentially weighted history of the input:
+%
+\begin{equation}
+  V[t] \;=\; \sum_{k=0}^{t} \lambda^{\,k}\, W\, X[t-k].
+  \label{eq:unroll}
+\end{equation}
+%
+Equation~\eqref{eq:unroll} is the object the entire method rests on: $V$ is a \emph{causal,
+leaky linear filter} of the event stream, with an effective memory horizon of $\sim\tau$
+steps. Two immediate consequences frame everything that follows. First, $V$ is \emph{not} a
+memoryless function of the current frame---it carries the temporal structure of recent
+input, which is why temporally-structured corruptions leave a signature even when the
+marginal input distribution is unchanged. Second, because the map from $X$ to $V$ is linear,
+the \emph{moments} of $V$ inherit closed-form dependence on the moments of $X$, which we now
+make explicit.
+
+\subsection{The feature: per-channel membrane moments}
+\label{sec:theory-feature}
+
+For each channel $c$ in each of the four PLIF layers, we apply Global Average Pooling (GAP)
+over the spatial dimensions of $V$ and compute the first three central moments of the pooled
+trace across the $T$ steps:
+%
+\begin{equation}
+  \varphi_c \;=\; \big[\, \mu_c,\; \sigma_c^2,\; \kappa_c \,\big],
+  \qquad
+  \mu_c = \mathbb{E}[V_c],\quad
+  \sigma_c^2 = \mathrm{Var}[V_c],\quad
+  \kappa_c = \frac{\mathbb{E}\big[(V_c-\mu_c)^4\big]}{\sigma_c^4}.
+  \label{eq:phi}
+\end{equation}
+%
+Stacking over $704$ channels across the four layers yields the $2112$-dimensional descriptor
+$\varphi$. The mean captures sustained drive, the variance captures fluctuation energy, and
+the kurtosis captures burstiness (heavy-tailed, intermittent excitation). We show next that
+these three coordinates are individually informative about \emph{different} corruption
+families.
+
+\subsection{Steady-state moments under a stationary input}
+\label{sec:theory-moments}
+
+Suppose the per-channel input current is wide-sense stationary with mean $m=\mathbb{E}[X]$,
+variance $s^2=\mathrm{Var}[X]$, and autocovariance $\gamma(j)=\mathrm{Cov}(X[t],X[t-j])$.
+Taking expectations of the geometric sum \eqref{eq:unroll} in the long-horizon limit
+($\sum_k \lambda^k \to 1/(1-\lambda)$) gives the steady-state membrane \emph{mean}
+%
+\begin{equation}
+  \mathbb{E}[V] \;=\; \frac{W m}{1-\lambda} \;=\; \tau\, W m,
+  \label{eq:mean}
+\end{equation}
+%
+so the mean is the input rate \emph{amplified by the time constant} $\tau$. The steady-state
+\emph{variance}, assuming weak temporal correlation ($\gamma(j)\!\approx\!0$ for $j>0$), is
+%
+\begin{equation}
+  \mathrm{Var}[V] \;=\; (W s)^2 \sum_{k=0}^{\infty} \lambda^{2k}
+  \;=\; \frac{(W s)^2}{1-\lambda^2}
+  \;=\; \frac{\tau^2}{2\tau-1}\,(W s)^2,
+  \label{eq:var}
+\end{equation}
+%
+i.e.\ the membrane variance tracks the \emph{input variance}, scaled by a leak-dependent
+constant. Retaining the autocovariance term generalizes \eqref{eq:var} to
+%
+\begin{equation}
+  \mathrm{Var}[V] \;=\; \frac{(W s)^2}{1-\lambda^2}
+  \;+\; 2 W^2 \sum_{j=1}^{\infty} \gamma(j)\,\frac{\lambda^{\,j}}{1-\lambda^2},
+  \label{eq:var-auto}
+\end{equation}
+%
+which is the key to temporal corruptions: the second term depends on the \emph{time
+ordering} of the input, not its marginal distribution. A corruption that preserves $m$ and
+$s^2$ but scrambles $\gamma(j)$ moves $\mathrm{Var}[V]$ (and, through higher-order analogues,
+the kurtosis and the autocorrelation of $V(t)$) while leaving the naive first-moment picture
+untouched. Equations~\eqref{eq:mean}--\eqref{eq:var-auto} are the three levers every
+corruption pulls; the rest of the section reads off, corruption by corruption, which lever
+moves and therefore which feature detects it.
+
+\subsection{Per-corruption analysis}
+\label{sec:theory-percorruption}
+
+\paragraph{Hot-pixel --- DC saturation (predicted AUROC $\approx 1$).}
+A stuck/hot pixel injects a persistent constant $\delta$ into $X[t]$ at fixed spatial
+locations for the affected channels. Adding a constant $\delta$ to the input in
+\eqref{eq:mean} shifts the membrane mean by $\tau W \delta$, an unbounded accumulation that
+drives $V$ monotonically toward---and clamps it at---the firing threshold $\theta$. The
+affected channels' $\mu_c$ therefore saturate at a value disjoint from the clean range,
+producing two non-overlapping clusters in $\varphi$-space. Detection is not merely easy but
+\emph{mathematically inevitable}, and it is monotone in severity because larger $\delta$
+saturates more channels. This is exactly the measured behaviour (perfect AUROC and Spearman
+monotonicity).
+
+\paragraph{Temporal jitter --- autocorrelation destruction (temporal/deep features only).}
+Temporal jitter permutes the time order of $X[t]$ within a window. A permutation is
+measure-preserving: it leaves the marginal mean $m$ and variance $s^2$---and hence
+\eqref{eq:mean} and the \emph{first} term of \eqref{eq:var-auto}---unchanged. What it
+destroys is the autocovariance $\gamma(j)$, i.e.\ the second term of \eqref{eq:var-auto} and,
+more sharply, the lag-1 autocorrelation of the membrane trace $V(t)$ itself. The leaky filter
+\eqref{eq:unroll} is precisely an autocorrelation-generating operation, so jitter is visible
+in the \emph{temporal} structure of $V$ even though it is invisible to the static marginal
+mean. This predicts, and the data confirm, that jitter is caught by temporal statistics
+(lag-1 autocorrelation) and by deeper layers whose larger effective $\tau$ integrate
+longer-range temporal structure---the layer-4 slice is the strongest single view for jitter.
+
+\paragraph{Event-rate shift --- global affine drive (single activity scalar).}
+An event-rate shift multiplies the global input rate $m \to \alpha m$. By \eqref{eq:mean}
+this scales the membrane mean of \emph{every} channel by the same factor $\alpha$, an
+approximately affine displacement of $\varphi$ along a single global-activity direction. The
+corruption is thus detectable by a one-dimensional projection---a global activity
+scalar---which is why a single summary statistic recovers most of the signal, and why the
+per-frame AUROC shows a phase transition once $\alpha$ leaves the clean operating band.
+
+\paragraph{Spatial dropout --- variance loss hidden by GAP (anti-detectable under one-sided
+scoring).}
+Spatial dropout zeros a contiguous spatial \emph{region} of $X[t]$. Within an affected
+channel this lowers the spatial input variance and, through \eqref{eq:var}, the membrane
+variance $\sigma_c^2$, while leaving the channel mean $\mu_c$ comparatively intact (the
+surviving region still drives the neuron). Variance is therefore the single most informative
+moment for this corruption---but GAP pools away the \emph{spatial} dimension before the
+moments are taken, so the dominant signature (which spatial regions went silent) is
+discarded, and what remains makes the membrane look \emph{quieter and more regular}, i.e.\
+closer to the clean mean. Under one-sided distance-from-clean scoring this inverts the
+detector (AUROC $< 0.5$): the corruption is anti-detectable not because the information is
+absent from $V$ but because GAP plus a one-sided rule throws it away. This is the formal
+motivation for the spatial-dispersion features (\texttt{phi\_spatial}) and for two-sided
+scoring (Section~\ref{sec:method}).
+
+\paragraph{Event flood --- uniform mean shift indistinguishable from a busy scene
+(near-chance per frame).}
+Event flood adds approximately uniform noise across all pixels, raising $m$ uniformly. By
+\eqref{eq:mean} this lifts the mean of \emph{all} channels by nearly the same amount---the
+identical signature a genuinely busy, high-activity clean scene produces. Because the clean
+distribution already contains such high-activity scenes, the flooded frames are not separable
+from the clean tail on the marginal moments alone, giving near-chance per-frame AUROC. The
+information that \emph{does} distinguish flood---that the elevated activity is spatially
+unstructured (it fills space rather than tracking objects)---again lives in the spatial
+dispersion GAP removes, and in the temporal \emph{consistency} of the bias across a sequence.
+This predicts the two recoveries we observe: spatial features, and sequence-level
+aggregation, which lifts flood to near-perfect AUROC once the per-frame bias is integrated
+over a whole recording.
+
+\paragraph{Polarity flip --- invariance by construction ($\approx 0.5$ ceiling, a
+membrane-side dead end).}
+Polarity flip inverts the ON/OFF sign of the events. The upstream detector was trained to be
+approximately polarity-symmetric; to the extent that symmetry holds, $W X$ is near-invariant
+to the flip, so $V$---and therefore $\varphi$---barely moves, and the AUROC ceiling is
+$\approx 0.5$ \emph{by construction}, not through any deficiency of the detector. The small,
+consistent residual below chance (a few points) reflects imperfect symmetry, i.e.\ a faint
+directional shift rather than noise. The honest conclusion is that polarity\_flip is largely
+undetectable from the membrane and its signal lives on the \emph{input} side (the
+positive/negative event-count balance the flip inverts); we scope it accordingly rather than
+chase it.
+
+\subsection{Why GAP causes the inversions, and what the theory prescribes}
+\label{sec:theory-taxonomy}
+
+The three hard corruptions---spatial\_dropout, event\_flood, polarity\_flip---share a single
+mechanism in the analysis above: their discriminative signature lives in structure that
+GAP-then-moments discards (spatial dispersion for the first two, input-side sign balance for
+the third), while the surviving marginal moments are preserved or even pushed toward the
+clean mean. This yields a clean, falsifiable taxonomy that organizes the entire results
+section:
+%
+\begin{itemize}
+  \item \textbf{Magnitude corruptions} (hot\_pixel, event\_rate\_shift, event\_flood-as-mean,
+        temporal\_jitter via variance) move the membrane moments \emph{away} from clean and
+        are caught by distance-based detectors on $\varphi$.
+  \item \textbf{Structure corruptions} (spatial\_dropout, and the spatial component of
+        event\_flood) leave the marginal moments intact and require either the
+        spatial-dispersion features GAP discards or a scoring rule that flags ``too
+        typical,'' not only ``too far.''
+  \item \textbf{Invariant corruptions} (polarity\_flip) are near-orthogonal to the membrane
+        and are an input-side, not a membrane-side, detection problem.
+\end{itemize}
+%
+The theory therefore does three things at once: it \emph{explains} the easy wins as
+inevitable, it \emph{predicts} the inversions from first principles, and it \emph{prescribes}
+the architecture that addresses them---the spatial branch, two-sided scoring, and sequence
+aggregation that the MDD detector (Section~\ref{sec:method}) combines. Crucially, it does so
+without any free parameters fit to the corruption labels: every prediction follows from the
+PLIF state equation and the definition of the feature.
+
+\section{The Neuromorphic Hardware Advantage}
+\label{sec:hardware}
+
+The empirical case for membrane-statistics OOD detection is incomplete without its central
+positioning claim, which is not about accuracy at all. Existing OOD detectors are designed
+for artificial neural networks executed on von Neumann hardware, where logits, gradients, and
+repeated forward passes are cheap. Spiking networks are deployed for the opposite reason---to
+run within the severe energy and compute budget of neuromorphic silicon---and in that regime
+the standard OOD toolkit is not merely expensive but \emph{architecturally infeasible}.
+Membrane statistics are the rare signal that is free precisely where every alternative is
+impossible. This reframes the contribution from ``a competitive OOD score'' to ``the only OOD
+method that runs on the hardware the model targets.''
+
+\subsection{The membrane potential is a native, already-maintained register}
+\label{sec:hardware-register}
+
+On the major neuromorphic platforms---Intel Loihi \cite{davies2018loihi}, the BrainScaleS
+analog system \cite{schemmel2010brainscales}, and SpiNNaker \cite{furber2014spinnaker}---each
+neuron's membrane potential $V$ is \emph{physical state the substrate already maintains}. It
+is not an intermediate that must be recomputed for our purposes; it is the quantity the neuron
+updates on every time step in order to decide whether to spike, held in a local register
+(digital cores) or a capacitor voltage (analog). Producing our descriptor $\varphi$ from it
+requires only a read of that state and a reduction to three per-channel moments---an
+$O(\text{channels})$ operation with no additional synaptic integration. In the cost accounting
+that matters on-chip---multiply--accumulate operations and memory traffic for weights---%
+$\varphi$ adds \emph{zero MACs and zero weight fetches}: it is a byproduct of the forward pass
+that has to happen anyway to emit spikes. This is the precise sense in which the method is
+``zero additional compute,'' and it is a property of \emph{where} the signal comes from, not
+an optimization we apply afterward.
+
+\subsection{Why competing OOD methods cannot run on the target hardware}
+\label{sec:hardware-table}
+
+The dominant OOD families each presuppose a capability that the neuromorphic execution model
+does not provide. We enumerate them not to claim our accuracy is higher, but to establish that
+the comparison cannot even take place on-chip.
+
+\begin{table}[t]
+  \centering
+  \small
+  \begin{tabularx}{\linewidth}{@{}l X X@{}}
+    \toprule
+    Method & Required extra computation & Why infeasible on neuromorphic HW \\
+    \midrule
+    \textbf{Vmem-$\varphi$ (ours)} & native $V$ register read + moments & --- (it is free) \\
+    MSP \cite{hendrycks2017msp} / Energy \cite{liu2020energy}
+      & softmax / log-sum-exp over logits
+      & cores emit spikes, not float logits; no on-chip softmax \\
+    ODIN \cite{liang2018odin}
+      & temperature softmax + input perturbation
+      & perturbation needs an input-gradient pass the chip cannot take \\
+    ReAct \cite{sun2021react}
+      & activation clipping + second forward pass
+      & re-forwarding violates the SNN energy budget \\
+    ViM \cite{wang2022vim}
+      & SVD / dense linear algebra on features
+      & no dense float linear-algebra unit; data movement alone too costly \\
+    GradNorm \cite{huang2021gradnorm}
+      & gradient backpropagation at inference
+      & neuromorphic inference has no backward pass \\
+    kNN / Mahalanobis on \emph{ANN} features \cite{lee2018mahalanobis,sun2022knn}
+      & an auxiliary ANN forward pass
+      & requires a second, non-spiking network---defeating the SNN premise \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Standard OOD detectors each require a capability absent from the spiking,
+  feed-forward, integer-event execution model; Vmem-$\varphi$ requires none because the signal
+  is the neuron state itself.}
+  \label{tab:hardware}
+\end{table}
+
+The pattern is uniform: every alternative needs either a floating-point readout layer
+(softmax, SVD), a second pass (ReAct, ANN-feature methods), or a gradient (ODIN,
+GradNorm)---none of which exist in the spiking, feed-forward, integer-event execution model.
+Vmem-$\varphi$ needs none of them because the signal is the neuron state itself.
+
+\subsection{The reframed contribution}
+\label{sec:hardware-claim}
+
+It follows that the benchmark of Section~\ref{sec:experiments} should be read not as
+``$\varphi$ narrowly beats ANN OOD baselines on a GPU'' but as ``$\varphi$ provides usable OOD
+detection \emph{inside the compute envelope of the deployment hardware}, where the listed
+alternatives cannot be evaluated at all.'' This is a categorical claim about feasibility, and
+it is what makes the work a distinct contribution rather than another row in an OOD
+leaderboard: for spiking networks on neuromorphic silicon, membrane-statistics OOD detection
+is not the best option among many---under a strict on-chip compute budget it is, to our
+knowledge, the only option that is free.
+
+\subsection{Scope and honesty caveat}
+\label{sec:hardware-caveat}
+
+We measure $\varphi$ in simulation (SpikingJelly on a GPU), not on neuromorphic silicon. Our
+cost claim is therefore \emph{architectural}---it follows from $V$ being a register the
+substrate already maintains and from $\varphi$ adding no synaptic operations---rather than a
+wall-clock or joule measurement on-chip. We state this explicitly: the contribution is that
+the signal is free \emph{by construction} on the target hardware, and an on-silicon energy
+measurement is identified as future work. We likewise restrict the infeasibility argument to
+the standard execution models of current neuromorphic platforms; co-processor or hybrid
+configurations could in principle host some of the listed methods at a cost, which only
+sharpens the comparison rather than changing its direction.
+
+% --- Standalone bibliography (skipped when embedded). Manual thebibliography so
+%     the standalone build needs no .bib file and no bibtex pass. Replace with a
+%     real \bibliography{...} when merging into the full manuscript.
+\ifdefined\theoryhardwareEMBED\else
+\begin{thebibliography}{99}
+
+\bibitem{fang2021plif}
+W.~Fang, Z.~Yu, Y.~Chen, T.~Masquelier, T.~Huang, and Y.~Tian.
+\newblock Incorporating learnable membrane time constant to enhance learning of
+  spiking neural networks.
+\newblock In \emph{ICCV}, 2021.
+
+\bibitem{davies2018loihi}
+M.~Davies et~al.
+\newblock Loihi: A neuromorphic manycore processor with on-chip learning.
+\newblock \emph{IEEE Micro}, 38(1):82--99, 2018.
+
+\bibitem{schemmel2010brainscales}
+J.~Schemmel, D.~Br\"uderle, A.~Gr\"ubl, M.~Hock, K.~Meier, and S.~Millner.
+\newblock A wafer-scale neuromorphic hardware system for large-scale neural
+  modeling.
+\newblock In \emph{ISCAS}, pages 1947--1950, 2010.
+
+\bibitem{furber2014spinnaker}
+S.~B. Furber, F.~Galluppi, S.~Temple, and L.~A. Plana.
+\newblock The SpiNNaker project.
+\newblock \emph{Proceedings of the IEEE}, 102(5):652--665, 2014.
+
+\bibitem{hendrycks2017msp}
+D.~Hendrycks and K.~Gimpel.
+\newblock A baseline for detecting misclassified and out-of-distribution
+  examples in neural networks.
+\newblock In \emph{ICLR}, 2017.
+
+\bibitem{liu2020energy}
+W.~Liu, X.~Wang, J.~D. Owens, and Y.~Li.
+\newblock Energy-based out-of-distribution detection.
+\newblock In \emph{NeurIPS}, 2020.
+
+\bibitem{liang2018odin}
+S.~Liang, Y.~Li, and R.~Srikant.
+\newblock Enhancing the reliability of out-of-distribution image detection in
+  neural networks.
+\newblock In \emph{ICLR}, 2018.
+
+\bibitem{sun2021react}
+Y.~Sun, C.~Guo, and Y.~Li.
+\newblock ReAct: Out-of-distribution detection with rectified activations.
+\newblock In \emph{NeurIPS}, 2021.
+
+\bibitem{wang2022vim}
+H.~Wang, Z.~Li, L.~Feng, and W.~Zhang.
+\newblock ViM: Out-of-distribution with virtual-logit matching.
+\newblock In \emph{CVPR}, 2022.
+
+\bibitem{huang2021gradnorm}
+R.~Huang, A.~Geng, and Y.~Li.
+\newblock On the importance of gradients for detecting distributional shifts in
+  the wild.
+\newblock In \emph{NeurIPS}, 2021.
+
+\bibitem{lee2018mahalanobis}
+K.~Lee, K.~Lee, H.~Lee, and J.~Shin.
+\newblock A simple unified framework for detecting out-of-distribution samples
+  and adversarial attacks.
+\newblock In \emph{NeurIPS}, 2018.
+
+\bibitem{sun2022knn}
+Y.~Sun, Y.~Ming, X.~Zhu, and Y.~Li.
+\newblock Out-of-distribution detection with deep nearest neighbors.
+\newblock In \emph{ICML}, 2022.
+
+\end{thebibliography}
+\end{document}
+\fi

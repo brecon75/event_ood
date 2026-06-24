@@ -1,0 +1,108 @@
+import sys, os
+from pathlib import Path
+
+# Fix paths for imports
+_HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(_HERE.parent))
+
+# When run directly, resolve --output-dir / --gen1-root BEFORE importing
+# benchmark_config so every derived path honors them: phi is read from
+# <output-dir>/phi and plots+tables are written under <output-dir>. Guarded to
+# __main__ so importing this module (e.g. by run_phi_stages) is side-effect free.
+if __name__ == "__main__":
+    import argparse
+    _ap = argparse.ArgumentParser(add_help=True, description="Run the full phi-analysis suite.")
+    _ap.add_argument("--output-dir", default=None,
+                     help="output root: reads phi from <dir>/phi, writes plots+tables under <dir>")
+    _ap.add_argument("--gen1-root", default=None,
+                     help="Gen1 dataset root (accepted for uniformity; analysis runs on extracted phi)")
+    _a, _ = _ap.parse_known_args()
+    if _a.output_dir:
+        os.environ["VMEM_OUTPUT_DIR"] = _a.output_dir
+    if _a.gen1_root:
+        os.environ["VMEM_GEN1_ROOT"] = _a.gen1_root
+
+import torch
+from vmem_benchmark import benchmark_config as cfg
+
+# Import components
+from analysis.vmem_utils import LazyPhiDict, TABLE_DIR
+from analysis.analyse_plots import (
+    plot_sensitivity_heatmap, plot_auroc_vs_severity,
+    plot_all_trajectories, plot_pca_subspaces, plot_per_layer_distributions
+)
+from analysis.analyse_comparisons import (
+    run_per_layer_auroc_table, run_statwise_ablation,
+    run_detector_comparison, run_spearman_severity,
+    save_full_results_table, run_severity_regression,
+    run_corruption_classification, run_conformal_prediction,
+    _build_detectors, split_clean,
+)
+from analysis.analyse_temporal import run_temporal_analysis
+
+def main():
+    cfg.PLOT_DIR.mkdir(parents=True, exist_ok=True)
+    TABLE_DIR.mkdir(parents=True, exist_ok=True)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"\n============================================================")
+    print(f"CUDA Available in PyTorch: {torch.cuda.is_available()}")
+    print(f"Target Device for OOD Scorers: {device.upper()}")
+    print(f"============================================================\n")
+
+    print("Initializing lazy phi loader...")
+    all_phi = LazyPhiDict()
+
+    if not all_phi:
+        print(f"No results found in {cfg.PHI_DIR}. Run extract.py first.")
+        sys.exit(1)
+    if "clean" not in all_phi:
+        print("ERROR: clean.pt missing from phi directory.")
+        sys.exit(1)
+
+    n_corrupted = sum(1 for k in all_phi if k != "clean")
+    print(f"Loaded {len(all_phi)} phi files  ({n_corrupted} corrupted runs).")
+    seq_lens = all_phi.get_seq_lens("clean")
+    n_seq_desc = f"{len(seq_lens)} sequences" if seq_lens else "unknown sequence count"
+    print(f"Clean phi shape: {all_phi['clean'].shape}  "
+          f"({all_phi['clean'].shape[0]} frames, {n_seq_desc})")
+
+    # ── Level 1: original plots ──────────────────────────────────────────────
+    plot_sensitivity_heatmap(all_phi)
+    plot_auroc_vs_severity(all_phi)
+    plot_per_layer_distributions(all_phi)
+    plot_all_trajectories()
+
+    # ── Level 2: per-layer + stat-wise ──────────────────────────────────────
+    run_per_layer_auroc_table(all_phi)
+    if n_corrupted > 0:
+        run_statwise_ablation(all_phi)
+
+    # ── Level 3: detector comparison ────────────────────────────────────────
+    if n_corrupted > 0:
+        # Build all 7 detectors once — Flow and AE training is expensive
+        clean_train, _ = split_clean(all_phi["clean"])
+        detectors = _build_detectors(clean_train)
+        run_detector_comparison(all_phi, detectors=detectors)
+
+    # ── Level 4: temporal features from trajs ───────────────────────────────
+    run_temporal_analysis(all_phi)
+
+    # ── Level 5: Spearman + full table ──────────────────────────────────────
+    if n_corrupted > 0:
+        run_spearman_severity(all_phi)
+        save_full_results_table(all_phi, detectors=detectors)
+
+    # ── Ideas 3, 5, 6, 7: PCA, Severity Regression, Classification, Conformal ──
+    if n_corrupted > 0:
+        plot_pca_subspaces(all_phi)
+        run_severity_regression(all_phi)
+        run_corruption_classification(all_phi)
+        run_conformal_prediction(all_phi)
+
+    print(f"\nAnalysis complete.")
+    print(f"  Plots  -> {cfg.PLOT_DIR}")
+    print(f"  Tables -> {TABLE_DIR}")
+
+if __name__ == "__main__":
+    main()

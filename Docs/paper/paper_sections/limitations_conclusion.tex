@@ -1,0 +1,44 @@
+\section{Limitations and the Open Challenge}
+\label{sec:limitations}
+
+\paragraph{Honest residuals.}
+Two corruptions remain unsolved from the membrane alone, and the theory predicts why.
+\texttt{spatial\_dropout}'s discriminative signature is \emph{spatial} (which regions went
+dark), and global average pooling discards spatial layout before the moments are taken; the
+released spatial-dispersion features (\texttt{phi\_spatial}: per-channel spatial variance and
+participation ratio) restore that signal and feed the MDD's spatial branch, which we have
+implemented and validated end-to-end on a controlled contraction (a signal present only in
+\texttt{phi\_spatial} is lifted from fused-without-spatial AUROC $\approx 0.50$ to
+$\approx 1.00$). Confirming the lift on real \texttt{spatial\_dropout} requires re-extracting
+$\varphi$ with \texttt{phi\_spatial} (a GPU run on the user's cluster) and is the single
+highest-leverage remaining experiment. \texttt{polarity\_flip} is a property of the trained
+network's polarity invariance, not of our representation, and is undetectable from
+$V_{\mathrm{mem}}$ by construction -- its signal lives on the input side. We frame both as an
+\textbf{open challenge to the community}: the Achilles' heel of event-based perception, where
+corruptions are at once \emph{harmful} to detection (Section~\ref{sec:motivation}) and
+\emph{hard} to detect cheaply.
+\advisor{point: if we cannot push these above 0.6, frame as a discovery / community alert. Both levers (spatial branch; adaptive neurons for flood) are identified.}
+
+\paragraph{Other limitations.}
+(i)~The cost claim is \emph{architectural} -- $V_{\mathrm{mem}}$ is measured in simulation
+(SpikingJelly on a GPU), not on neuromorphic silicon; an on-chip energy measurement is future
+work. (ii)~AUROC figures are oracle-labelled separability point estimates on a single
+leakage-safe split, without bootstrap confidence intervals or a full severity sweep with CIs.
+(iii)~Results are on a single dataset (Gen1); transfer to other event datasets (e.g.\ DSEC,
+Gen4) is untested. (iv)~Severities are synthetic transforms calibrated to be monotonic, not
+measured sensor failures -- the contribution is the benchmark, protocol, and feature release,
+not inventing corruption physics.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We introduced the task of out-of-distribution detection for event-camera spiking detectors
+from the \emph{free} sub-threshold membrane potential, the Gen1-C corruption benchmark, a
+closed-form theory of per-corruption detectability, and the Manifold-Decomposition Detector
+that follows from a dilation/contraction geometric diagnosis. We showed empirically that a
+pretrained SOTA detector collapses under these corruptions, motivating cheap on-chip
+detection; that $\varphi$ is the only OOD signal that runs inside the target hardware's
+compute envelope; and that one unsupervised score takes four of six corruptions to
+$\geq 0.96$ with sequence aggregation. The two residuals are predicted by the theory and
+released as an open challenge, with a concrete, biologically-grounded path -- spatial-
+dispersion features and adaptive neurons -- toward closing them.

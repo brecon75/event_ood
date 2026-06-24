@@ -1,0 +1,58 @@
+\section{Introduction}
+\label{sec:intro}
+
+Event cameras report per-pixel brightness changes asynchronously at microsecond resolution,
+high dynamic range, and low power; paired with spiking neural networks (SNNs) they form the
+canonical low-power perception stack for neuromorphic hardware. As these systems move toward
+safety-critical deployment (automotive, robotics), a basic question becomes unavoidable:
+\emph{when the sensor input drifts away from the training distribution, can the system
+notice?} Out-of-distribution (OOD) detection is the standard answer for artificial neural
+networks (ANNs), but essentially every method in that literature assumes a capability the
+neuromorphic execution model does not provide -- floating-point logits (MSP, Energy),
+input gradients (ODIN, GradNorm), or a second forward pass over the features (ReAct,
+ANN-feature Mahalanobis/kNN). On a chip that emits spikes and integer events under a strict
+energy budget, these are not merely expensive but architecturally infeasible
+(Section~\ref{sec:hardware}).
+
+We start from a signal that is free exactly where the alternatives are impossible. The
+Parametric Leaky-Integrate-and-Fire (PLIF) neuron maintains a sub-threshold membrane
+potential $V_{\mathrm{mem}}(t)$ -- physical state the substrate already updates on every
+time step to decide whether to spike. Reading it and reducing it to a few per-channel
+moments adds zero multiply--accumulates and zero weight fetches. We call the resulting
+$2112$-dimensional descriptor $\varphi$ and ask how far this free signal goes as an OOD
+detector against realistic event-camera corruptions.
+
+\paragraph{Why this matters (and that it is not hypothetical).}
+\advisor{point 2 -- empirically motivate the need for event-OOD detection.}
+A reviewer may reasonably ask whether these corruptions actually hurt a competent model.
+Section~\ref{sec:motivation} answers this directly: we take a pretrained, published
+state-of-the-art hybrid SNN--ANN event detector~\cite{neftci2025hybrid} and, \emph{with no
+retraining}, run inference on clean versus corrupted Gen1. Detection mAP degrades sharply
+under several corruptions, confirming that event-stream OOD is a concrete, quantifiable
+failure mode -- which is the empirical motivation for detecting it cheaply on-chip.
+
+\paragraph{Contributions.}
+\begin{enumerate}
+  \item \textbf{Gen1-C}, a reproducible (seeded, deterministic, model-agnostic) event-camera
+        corruption benchmark of six sensor-grounded corruptions $\times$ five monotonic
+        severities, released as code + seeds in the ImageNet-C~\cite{hendrycks2019imagenetc}
+        tradition, together with a released membrane-statistics ($\varphi$) feature set
+        (Section~\ref{sec:corruptions}).
+        \advisor{point 1 -- claim the dataset/benchmark as a contribution.}
+  \item A \emph{zero-cost} OOD signal, $\varphi$, and the argument that it is the only OOD
+        method that runs inside the compute envelope of the target hardware
+        (Section~\ref{sec:hardware}).
+  \item A closed-form leaky-integrator \emph{theory} that predicts per-corruption
+        detectability from the PLIF state equation, with no parameters fit to corruption
+        labels (Section~\ref{sec:theory}).
+  \item A \emph{motivation} experiment quantifying how much a SOTA detector degrades under
+        these corruptions (Section~\ref{sec:motivation}).
+  \item The \textbf{Manifold-Decomposition Detector} (MDD): a dilation/contraction geometric
+        diagnosis and a direction-conditioned, two-sided detector that follows from it
+        (Section~\ref{sec:method}).
+  \item Honest negatives framed as an \emph{open challenge}: \texttt{polarity\_flip}
+        (network invariance) and \texttt{spatial\_dropout} (a signature pooling discards)
+        remain hard from the membrane alone -- the Achilles' heel of event-based processing,
+        and an invitation to the community.
+        \advisor{point on alerting the community to these vulnerabilities.}
+\end{enumerate}

@@ -1,0 +1,60 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Datasets
+gen1/
+gen1.tar
+
+# Checkpoints and models
+*.ckpt
+*.pt
+*.pth
+models/
+
+# Outputs and results
+outputs/
+test_outputs/
+results/
+figures/
+vmem_benchmark/outputs/
+analysis/outputs/
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+vmem_benchmark/.venv/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Live logs & temporary backups
+test_pipeline_live.log
+vmem_benchmark/benchmark_config.py.bak
+
+# Test pipelines & run logs
+run_test_pipeline.ps1
+run_test_pipeline.sh
+log.txt
+
+# Large generated artifact dirs (renamed/backup/stale extraction outputs)
+vmem_benchmark/outputs_backup_*/
+vmem_benchmark/outputs_stale_*/
+# Run logs & scratch arrays
+test_pipeline_run.log
+test_ideas_seq_lens.npy
+
+# Local-only test suite — kept on disk for local use, never committed/pushed
+tests/
+pytest.ini
+run_analysis_tests.py
+test_ideas/
+
+# Local-only Modal cloud scripts — never committed/pushed
+modal/

@@ -4,15 +4,24 @@ monitor.py — VmemMonitor for SpikingJelly MultiStepParametricLIFNode.
 Hooks into PLIF layers to collect membrane potential 'v' and compute
 phi vectors [mean, variance, excess_kurtosis] with Global Average Pooling.
 
-Shape contract
---------------
-spike_model.py reshapes input (B, 20, H, W) → (B, 2, 10, H, W) then passes
+Shape contract (verified against spikingjelly.clock_driven.neuron source)
+-------------------------------------------------------------------------
+spike_model.py reshapes the input (B, 20, H, W) → (B, 10, 2, H, W) and feeds
 it to features_01 / features_23 (SeqToANNContainer + MultiStepParametricLIFNode).
-SpikingJelly's MultiStepParametricLIFNode in clock_driven mode stores its
-membrane potential as module.v with shape (T, C, H, W) — the batch dim is
-folded into the time sequence by the backbone's own reshape.
+SpikingJelly's multi-step nodes unroll dim 0 as time and store:
+  module.v_seq — membrane at ALL unrolled steps, shape (dim0, *rest)
+  module.v     — membrane at the LAST unrolled step only, shape (*rest)
 
-To keep all downstream code simple and correct, _make_hook canonicalises
+With the mandatory BATCH_SIZE=1, dim 0 (the batch axis) has length 1, so the
+node performs exactly ONE integration step whose "neuron batch" is the 10
+time bins. module.v therefore has shape (10, C, H, W): the leading axis is
+the 10 time bins, each processed by an independent single LIF step (reset
+every frame). This is what downstream code treats as the "T" axis of phi.
+
+NOTE: this only holds for B=1 — with B>1 module.v would be the membrane of
+the LAST sample only, silently corrupting phi. extract.py enforces B=1.
+
+To keep all downstream code simple and consistent, _make_hook canonicalises
 every captured tensor to (T, 1, C, H, W) immediately after capture.
 """
 import torch
@@ -29,6 +38,7 @@ class VmemMonitor:
         selected : list of PLIF indices to hook (0-indexed). None hooks all.
         """
         self._v: Dict[int, List[torch.Tensor]] = {}
+        self._spikes: Dict[int, List[torch.Tensor]] = {}
         self._hooks = []
         self._selected = selected
 
@@ -37,6 +47,7 @@ class VmemMonitor:
             if isinstance(module, MultiStepParametricLIFNode):
                 if selected is None or idx in selected:
                     self._v[idx] = []
+                    self._spikes[idx] = []
                     self._hooks.append(
                         module.register_forward_hook(self._make_hook(idx))
                     )
@@ -70,15 +81,78 @@ class VmemMonitor:
                 return
 
             self._v[idx].append(v)  # each entry: (T, B, C, H, W)
+
+            if isinstance(output, torch.Tensor):
+                spikes = output.detach().float()
+                if spikes.ndim == 4:
+                    spikes = spikes.unsqueeze(1)
+                elif spikes.ndim == 5:
+                    # spike_seq has shape (1, 10, C, H, W): dim 0 is the single
+                    # multistep step (B=1), dim 1 the 10 time bins. Canonicalise
+                    # to (T=10, B=1, C, H, W) so spike rows align 1:1 with the
+                    # phi rows (one per frame) instead of 10 per frame.
+                    if spikes.shape[0] == 1:
+                        spikes = spikes.flatten(0, 1).unsqueeze(1)
+                else:
+                    return
+                self._spikes[idx].append(spikes)
         return hook
 
     # ------------------------------------------------------------------
     # State management
     # ------------------------------------------------------------------
     def reset(self):
-        """Clear all collected membrane potentials."""
+        """Clear all collected membrane potentials and spikes."""
         for k in self._v:
             self._v[k] = []
+        for k in self._spikes:
+            self._spikes[k] = []
+
+    # ------------------------------------------------------------------
+    # Spike features extraction
+    # ------------------------------------------------------------------
+    def collect_spikes(self) -> Dict[str, torch.Tensor]:
+        """
+        Compute spike_rate and spike_entropy per layer and channel.
+        Returns a dict with:
+          'spike_rate': (B, sum_C)
+          'spike_entropy': (B, sum_C)
+        """
+        rate_parts = []
+        entropy_parts = []
+        
+        for idx in sorted(self._spikes.keys()):
+            sp_list = self._spikes[idx]
+            if not sp_list:
+                continue
+            
+            # Concatenate list of batch tensors along dim 1 (batch)
+            S = torch.cat(sp_list, dim=1)  # (T, B, C, H, W)
+            p = S.mean(dim=(0, 3, 4))      # (B, C)
+            
+            # Compute binary entropy: H(p) = -p log2(p) - (1-p) log2(1-p)
+            p_clip = torch.clamp(p, min=1e-8, max=1-1e-8)
+            entropy = -p_clip * torch.log2(p_clip) - (1 - p_clip) * torch.log2(1 - p_clip)
+            
+            rate_parts.append(p.cpu())
+            entropy_parts.append(entropy.cpu())
+            
+        if not rate_parts:
+            # Handle empty case with correct device (cpu)
+            device = "cpu"
+            for k in self._spikes:
+                if self._spikes[k]:
+                    device = self._spikes[k][0].device
+                    break
+            return {
+                'spike_rate': torch.empty((0, 0), device=device),
+                'spike_entropy': torch.empty((0, 0), device=device)
+            }
+            
+        return {
+            'spike_rate': torch.cat(rate_parts, dim=-1),      # (B, sum_C)
+            'spike_entropy': torch.cat(entropy_parts, dim=-1) # (B, sum_C)
+        }
 
     # ------------------------------------------------------------------
     # Phi extraction (B, 3*sum_C)
@@ -128,6 +202,146 @@ class VmemMonitor:
             return torch.empty((0,))
 
         return torch.cat(parts, dim=-1)  # (B, 3 * sum(C_layers))
+
+    # ------------------------------------------------------------------
+    # Spatial-dispersion phi (B, 2*sum_C) — survives what GAP discards
+    # ------------------------------------------------------------------
+    def collect_phi_spatial(self) -> torch.Tensor:
+        """Spatial statistics of the membrane activity map that GAP destroys.
+
+        collect_phi() Global-Average-Pools over space, discarding *where* each
+        channel fired and keeping only the average. Spatial corruptions
+        (spatial_dropout silences regions; event_flood inflates uniformly)
+        leave their primary signature in that spatial layout, so they are
+        nearly invisible to GAP'd phi. From the per-pixel temporal-mean map
+        mu_pix (B,C,D) and temporal-variance (energy) map var_pix (B,C,D) we
+        keep two cheap per-channel summaries, computed from tensors collect_phi
+        already materialises (near-zero extra cost, same forward pass):
+
+          spatial_var : Var over space of mu_pix — how NON-UNIFORM mean
+                        activity is across the sensor. Rises when regions go
+                        silent (dropout), falls under uniform flooding. A
+                        two-sided signal that GAP averages to zero.
+          spatial_pr  : participation ratio of the energy map var_pix over
+                        space, (Σ)^2 / (D · Σ²) in (0,1]; 1 = energy spread
+                        evenly across pixels, →0 = concentrated in a few.
+                        Captures spatial sparsity / concentration.
+
+        Returns
+        -------
+        (B, 2 * sum_layers(C_l)) — per layer [spatial_var(C) | spatial_pr(C)],
+        concatenated across layers. With BATCH_SIZE=1 this is (1, 1408).
+        """
+        parts = []
+        for idx in sorted(self._v.keys()):
+            v_list = self._v[idx]
+            if not v_list:
+                continue
+            V = torch.cat(v_list, dim=1)          # (T, B, C, H, W)
+            T, B, C, H, W = V.shape
+            D = H * W
+            V = V.view(T, B, C, D)
+
+            mu  = V.mean(0)                         # (B, C, D)
+            var = V.var(0, unbiased=False).clamp(min=1e-8)  # (B, C, D)
+
+            spatial_var = mu.var(-1, unbiased=False)        # (B, C)
+            s1 = var.sum(-1)                                # (B, C)
+            # Floor only guards a true 0/0; it must stay well below D*(var floor)^2
+            # (= D*1e-16) or it breaks the ratio's cancellation for low-energy
+            # channels, collapsing a uniform map's PR from 1.0 toward 0.
+            s2 = (var ** 2).sum(-1).clamp(min=1e-20)        # (B, C)
+            spatial_pr = (s1 ** 2) / (D * s2)               # (B, C) in (0, 1]
+
+            parts.append(torch.cat([spatial_var, spatial_pr], dim=-1))  # (B, 2C)
+
+        if not parts:
+            return torch.empty((0,))
+
+        return torch.cat(parts, dim=-1)  # (B, 2 * sum(C_layers))
+
+    # ------------------------------------------------------------------
+    # Spatial GAP trajectory extraction (B, T, sum(C_layers))
+    # ------------------------------------------------------------------
+    def collect_temporal_gap(self) -> torch.Tensor:
+        """
+        Compute spatial Global Average Pooling (GAP) online on GPU
+        over hooked layers to bypass the 15 TB trajectory storage bottleneck.
+
+        Returns
+        -------
+        (B, T, sum(C_layers)) on CPU
+        """
+        parts = []
+        for idx in sorted(self._v.keys()):
+            v_list = self._v[idx]
+            if not v_list:
+                continue
+            V = torch.cat(v_list, dim=1)  # (T, B, C, H, W)
+            T, B, C, H, W = V.shape
+
+            # Spatial average: (T, B, C, H, W) -> (T, B, C)
+            V_gap = V.mean(dim=(3, 4))
+            parts.append(V_gap.cpu())
+
+        if not parts:
+            return torch.empty((0,))
+
+        # Concatenate channels along dim -1: (T, B, sum(C_layers))
+        cat_gap = torch.cat(parts, dim=-1)
+        # Permute (T, B, sum(C_layers)) -> (B, T, sum(C_layers))
+        return cat_gap.permute(1, 0, 2)
+
+    # ------------------------------------------------------------------
+    # Temporal phi extraction (B, sum_layers * 7)
+    # ------------------------------------------------------------------
+    def collect_temporal_phi(self, theta: float = 1.0) -> torch.Tensor:
+        parts = []
+        for idx in sorted(self._v.keys()):
+            v_list = self._v[idx]
+            if not v_list:
+                continue
+            V = torch.cat(v_list, dim=1)  # (T, B, C, H, W)
+            T, B, C, H, W = V.shape
+            if T < 2:
+                continue
+            
+            # Average over channels and space to get scalar trace per batch sample: (T, B)
+            V_scalar = V.mean(dim=(2, 3, 4))
+            
+            margin = theta - V_scalar  # (T, B)
+            m_mean = margin.mean(dim=0)  # (B,)
+            m_min  = margin.min(dim=0).values  # (B,)
+            m_var  = margin.var(dim=0, unbiased=False)  # (B,)
+            
+            dV      = V_scalar[1:] - V_scalar[:-1]  # (T-1, B)
+            dV_mean = dV.abs().mean(dim=0)  # (B,)
+            dV_var  = dV.var(dim=0, unbiased=False)  # (B,)
+            
+            std  = V_scalar.std(dim=0, unbiased=False).clamp(min=1e-8)  # (B,)
+            Vc   = V_scalar - V_scalar.mean(dim=0, keepdim=True)  # (T, B)
+            autocorr = (Vc[:-1] * Vc[1:]).mean(dim=0) / std ** 2  # (B,)
+            
+            fft_mag  = torch.fft.rfft(V_scalar, dim=0).abs() ** 2  # (freq, B)
+            total_e  = fft_mag.sum(dim=0).clamp(min=1e-8)  # (B,)
+            hf_e     = fft_mag[max(1, T // 4):].sum(dim=0)  # (B,)
+            hf_ratio = hf_e / total_e  # (B,)
+            
+            # Stack features: shape (B, 7)
+            layer_feat = torch.stack(
+                [m_mean, m_min, m_var, dV_mean, dV_var, autocorr, hf_ratio], dim=1
+            )
+            parts.append(layer_feat)
+            
+        if not parts:
+            device = "cpu"
+            for k in self._v:
+                if self._v[k]:
+                    device = self._v[k][0].device
+                    break
+            return torch.empty((0, 0), device=device)
+            
+        return torch.cat(parts, dim=1)  # (B, sum_layers * 7)
 
     # ------------------------------------------------------------------
     # Trajectory extraction  {layer_idx: (T, n_samples, D)}

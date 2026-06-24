@@ -1,0 +1,78 @@
+\section{The Manifold-Decomposition Detector and OOD Results}
+\label{sec:method}
+
+\paragraph{From diagnosis to architecture.}
+The theory of Section~\ref{sec:theory} classifies corruptions by how they move $\varphi$
+relative to the clean manifold: \emph{dilations} push it outward (\texttt{hot\_pixel},
+\texttt{event\_rate\_shift}; \texttt{temporal\_jitter} in the deep-layer subspace),
+\emph{contractions} pull it toward the mode (\texttt{spatial\_dropout}, \texttt{event\_flood})
+and thereby \emph{invert} one-sided distance/density detectors, and \emph{invariant}
+corruptions (\texttt{polarity\_flip}) leave no membrane signature. No single signed scalar can
+face outward, inward, and into a subspace at once -- which is why every prior single detector
+(Mahalanobis, $k$-NN, GMM, flow, learned fusion) topped out near $0.70$ macro and inverted on
+contractions. The Manifold-Decomposition Detector (MDD) stops collapsing $\varphi$ to one
+number: it scores three (optionally four) orthogonal, two-sided axes and fuses them with a
+calibrated max -- a genuine, unsupervised OR. The branches are the global radius
+$|\,\lVert z\rVert-\mathbb{E}\lVert z\rVert|$, the direction-conditioned radial score (RCF;
+the novel core, which flags \emph{under}-dispersion and so detects contractions), a
+deep-layer (L4) Mahalanobis for timing, and -- when the spatial-dispersion features are
+extracted -- a spatial branch on the structure global pooling discards. Full derivation in the
+supplementary \texttt{novel.md}.
+
+\paragraph{Main results.}
+Tables~\ref{tab:mdd-frame} and~\ref{tab:mdd-seq} report fused MDD AUROC per corruption and
+severity, per-frame and per-sequence. \emph{Numbers are lifted verbatim from
+\texttt{Docs/paper\_figures.md} (source: \texttt{results/mdd\_metrics.csv} and
+\texttt{mdd\_metrics\_aggregated.csv}, generator \texttt{analysis/evaluate\_mdd.py}); they are
+oracle-labelled separability point estimates without confidence intervals.}
+
+\begin{table}[t]
+  \centering\small
+  \begin{tabular}{lccccc}
+    \toprule
+    Corruption & L1 & L2 & L3 & L4 & L5 \\
+    \midrule
+    \texttt{hot\_pixel}        & 0.983 & 1.000 & 1.000 & 1.000 & 1.000 \\
+    \texttt{temporal\_jitter}  & 0.617 & 0.640 & 0.663 & 0.737 & 0.823 \\
+    \texttt{event\_rate\_shift}& 0.412 & 0.440 & 0.674 & 0.713 & 0.866 \\
+    \texttt{polarity\_flip}    & 0.415 & 0.422 & 0.437 & 0.459 & 0.480 \\
+    \texttt{event\_flood}      & 0.413 & 0.418 & 0.428 & 0.445 & 0.469 \\
+    \texttt{spatial\_dropout}  & 0.407 & 0.406 & 0.404 & 0.404 & 0.399 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Fused MDD \textbf{per-frame} AUROC. Dilations are caught; the contractions
+  (\texttt{event\_flood}, \texttt{spatial\_dropout}) and the invariant \texttt{polarity\_flip}
+  sit near or below chance per-frame -- the open challenge.}
+  \label{tab:mdd-frame}
+\end{table}
+
+\begin{table}[t]
+  \centering\small
+  \begin{tabular}{lccccc}
+    \toprule
+    Corruption & L1 & L2 & L3 & L4 & L5 \\
+    \midrule
+    \texttt{hot\_pixel}        & 0.999 & 1.000 & 1.000 & 1.000 & 1.000 \\
+    \texttt{temporal\_jitter}  & 0.649 & 0.659 & 0.682 & 0.774 & 0.868 \\
+    \texttt{event\_rate\_shift}& 0.364 & 0.411 & 0.752 & 0.803 & 0.961 \\
+    \texttt{polarity\_flip}    & 0.376 & 0.396 & 0.434 & 0.485 & 0.527 \\
+    \texttt{event\_flood}      & 1.000 & 1.000 & 1.000 & 1.000 & 1.000 \\
+    \texttt{spatial\_dropout}  & 0.350 & 0.345 & 0.339 & 0.327 & 0.297 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Fused MDD \textbf{per-sequence} AUROC (per-frame scores averaged within a
+  recording). Sequence aggregation rescues \texttt{event\_flood} from $0.47$ to $\mathbf{1.00}$
+  -- the strongest frame$\to$sequence jump in the benchmark -- and lifts
+  \texttt{event\_rate\_shift} to $0.96$. \texttt{spatial\_dropout} and \texttt{polarity\_flip}
+  remain unsolved.}
+  \label{tab:mdd-seq}
+\end{table}
+
+\paragraph{Headline.}
+One unsupervised, corruption-blind score takes four of six corruptions to $\geq 0.96$ with
+sequence aggregation. The two residuals are not noise but \emph{predicted} dead ends:
+\texttt{spatial\_dropout}'s signature is spatial and global pooling discarded it (the
+released \texttt{phi\_spatial} branch is the prescribed fix -- Section~\ref{sec:limitations}),
+and \texttt{polarity\_flip} is a property of the trained network's invariance, not of our
+representation.
+\advisor{point 1 -- we attempt the lift; the spatial branch is implemented and validated, pending the phi\_spatial re-extraction. If it does not clear 0.6, we keep the open-challenge framing.}

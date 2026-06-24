@@ -20,37 +20,38 @@ def apply_corruption_to_tensor(
     tensor: torch.Tensor,
     name: str,
     severity: int,
-    seed: int = 42
+    seed=42,
 ) -> torch.Tensor:
     """
     Apply a named corruption to a torch.Tensor (N, 20, H, W).
-    
+
     Parameters
     ----------
     tensor   : (N, 20, H, W) float32 or uint8 torch.Tensor
     name     : corruption name (e.g., 'hot_pixel')
     severity : 1-5
-    seed     : for deterministic results
-    
+    seed     : int or sequence of ints. Callers processing multiple sequences
+               must vary this per sequence (e.g. ``[42, seq_idx]``) so each
+               sequence gets an independent noise realization; a constant seed
+               would inject the exact same hot pixels / patches / jitter shift
+               into every sequence.
+
     Returns
     -------
     Corrupted (N, 20, H, W) torch.Tensor (uint8)
     """
-    # 1. Prepare data
-    # Corruptions expect uint8 numpy arrays
+    # 1. Prepare data — corruptions expect uint8 numpy arrays.
     device = tensor.device
-    if tensor.is_floating_point():
-        # Histograms are usually stored as counts; if they are floats, 
-        # we assume they are already in the 0-255 range.
-        arr = tensor.detach().cpu().numpy().astype(np.uint8)
-    else:
-        arr = tensor.detach().cpu().numpy()
+    arr = tensor.detach().cpu().numpy()
+    if arr.dtype != np.uint8:
+        # Round and clip instead of a bare astype: float/int values > 255
+        # would otherwise wrap modulo 256.
+        arr = np.clip(np.rint(arr), 0, 255).astype(np.uint8)
 
     # 2. Setup RNG
     rng = np.random.default_rng(seed)
 
-    # 3. Apply via registry (using timestamps=None since most don't use it for histograms)
-    # The registry uses (histogram, timestamps, name, severity, rng)
+    # 3. Apply via registry (timestamps=None — histogram corruptions don't use them)
     corrupted_arr = apply_corruption(arr, None, name, severity, rng)
 
     # 4. Return as tensor on original device
@@ -66,4 +67,7 @@ if __name__ == "__main__":
     print(f"Original sum: {test_tensor.sum()}")
     print(f"Corrupted sum (hot_pixel L5): {corrupted.sum()}")
     assert corrupted.sum() > 0
+    # Different seeds must give different realizations
+    c2 = apply_corruption_to_tensor(test_tensor, "hot_pixel", 5, seed=[42, 1])
+    assert not torch.equal(corrupted, c2), "per-sequence seeds should differ"
     print("Sanity check passed.")

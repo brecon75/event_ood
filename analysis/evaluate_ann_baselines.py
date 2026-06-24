@@ -673,6 +673,11 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description="Score ANN ResNet-18 OOD baselines.")
     parser.add_argument(
+        "--ann-dir", type=Path, default=cfg.ANN_DIR,
+        help="Directory holding the extracted ANN features, with event_image/ "
+             "and voxel_grid/ subdirs (default: cfg.ANN_DIR).",
+    )
+    parser.add_argument(
         "--output", type=Path, default=cfg.OUTPUT_DIR / "results" / "ann_baselines.csv",
         help="Output CSV path (default: <OUTPUT_DIR>/results/ann_baselines.csv).",
     )
@@ -683,7 +688,7 @@ def main():
     )
     args = parser.parse_args()
 
-    base_dir = cfg.ANN_DIR
+    base_dir = args.ann_dir
     limit = 2 if args.test else None
 
     all_results = []

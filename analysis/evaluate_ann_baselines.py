@@ -567,7 +567,7 @@ class DetectorNNGuide:
         return -(conf * guidance)
 
 
-def evaluate_representation(rep_name, rep_dir):
+def evaluate_representation(rep_name, rep_dir, limit=None):
     detectors = {
         # classic / established post-hoc baselines
         "MSP": DetectorMSP(),
@@ -618,12 +618,14 @@ def evaluate_representation(rep_name, rep_dir):
     clean_scores = {name: det.score(eval_feats, eval_logits) for name, det in detectors.items()}
     
     results = []
-    
-    for f in tqdm(list(rep_dir.glob("*.pt")), desc=f"Evaluating {rep_name} runs"):
-        if f.name.startswith("_tmp_"):
-            continue  # leftover partial write from an interrupted extraction
+
+    run_files = [f for f in sorted(rep_dir.glob("*.pt"))
+                 if not f.name.startswith("_tmp_") and f.stem != "clean"]
+    if limit is not None:
+        run_files = run_files[:limit]
+
+    for f in tqdm(run_files, desc=f"Evaluating {rep_name} runs"):
         run_name = f.stem
-        if run_name == "clean": continue
         
         d = torch.load(f, weights_only=True, map_location="cpu")
         t_feats, t_logits = d["feat"], d["logit"]
@@ -668,22 +670,36 @@ def evaluate_representation(rep_name, rep_dir):
     return results
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Score ANN ResNet-18 OOD baselines.")
+    parser.add_argument(
+        "--output", type=Path, default=cfg.OUTPUT_DIR / "results" / "ann_baselines.csv",
+        help="Output CSV path (default: <OUTPUT_DIR>/results/ann_baselines.csv).",
+    )
+    parser.add_argument(
+        "--test", action="store_true",
+        help="Quick smoke mode: evaluate only the first 2 corrupted runs per "
+             "representation instead of all of them.",
+    )
+    args = parser.parse_args()
+
     base_dir = cfg.ANN_DIR
-    
+    limit = 2 if args.test else None
+
     all_results = []
     for rep in ["event_image", "voxel_grid"]:
         rep_dir = base_dir / rep
         if rep_dir.exists():
             print(f"Evaluating {rep}...")
-            res = evaluate_representation(rep, rep_dir)
+            res = evaluate_representation(rep, rep_dir, limit=limit)
             all_results.extend(res)
-            
+
     if all_results:
         df = pd.DataFrame(all_results)
-        out_dir = cfg.OUTPUT_DIR / "results"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        df.to_csv(out_dir / "ann_baselines.csv", index=False)
-        print(f"Results saved to {out_dir / 'ann_baselines.csv'}")
+        out_path = args.output
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(out_path, index=False)
+        print(f"Results saved to {out_path}")
     else:
         print("No results generated.")
 

@@ -63,7 +63,7 @@ from analysis.vmem_utils import (
 from analysis.evaluate_ann_baselines import (
     DetectorMSP, DetectorEnergy, DetectorODIN, DetectorMaxLogit, DetectorGEN,
     DetectorGradNorm, DetectorMahalanobis, DetectorKNN, DetectorNECO,
-    DetectorNNGuide, calc_fpr95,
+    DetectorNNGuide, DetectorMahalanobisPP, DetectorLogitGap, calc_fpr95,
 )
 
 # Logit produced by the hybrid detection head (GAP of cls_preds[0] output).
@@ -87,6 +87,10 @@ def _build_detectors():
         "kNN": DetectorKNN(),
         "NECO": DetectorNECO(),
         "NNGuide": DetectorNNGuide(),
+        # 2025 additions (feature-/logit-only, so faithful for this head too;
+        # LogitGap degenerates to the logit margin at the head's K=2)
+        "Mahalanobis++": DetectorMahalanobisPP(),
+        "LogitGap": DetectorLogitGap(),
     }
 
 

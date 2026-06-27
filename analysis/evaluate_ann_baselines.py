@@ -567,6 +567,74 @@ class DetectorNNGuide:
         return -(conf * guidance)
 
 
+class DetectorMahalanobisPP:
+    """Mahalanobis++ (Müller et al., ICML 2025, "Mahalanobis++: Improving OOD
+    Detection via Feature Normalization"). Project the penultimate features onto
+    the unit sphere BEFORE estimating the Gaussian and at test time
+    (Eq. 6: phî = phi / ||phi||_2, no mean-subtraction first). Strong variation
+    in feature norms violates the shared-covariance Gaussian assumption behind
+    the Mahalanobis distance; the L2-normalisation tightens that fit and is the
+    paper's entire contribution. The class-conditional means + tied covariance of
+    the paper collapse to ONE Gaussian here, exactly like DetectorMahalanobis,
+    because the corruption-OOD setting has no semantic classes for the clean
+    (ID) frames. Covariance is Ledoit-Wolf (the paper uses the empirical
+    estimate; shrinkage is a strict robustness improvement and matches the rest
+    of this suite)."""
+    def __init__(self): self.mu = None; self.P = None
+    @staticmethod
+    def _unit(feats):
+        x = np.ascontiguousarray(_np(feats), np.float32)
+        return x / (np.linalg.norm(x, axis=1, keepdims=True) + 1e-10)
+    def fit(self, feats, logits):
+        z = self._unit(feats)
+        try:
+            cov = ledoit_wolf_precision(z, op="Mahalanobis++ fit (L2-norm + Ledoit-Wolf)")
+            self.mu = cov.location_
+            self.P = cov.precision_
+        except Exception:
+            self.mu = z.mean(0)
+            self.P = np.eye(z.shape[1])
+    def score(self, feats, logits):
+        device = _device()
+        mu = torch.from_numpy(np.ascontiguousarray(self.mu, np.float32)).to(device)
+        P = torch.from_numpy(np.ascontiguousarray(self.P, np.float32)).to(device)
+        def fn(c):
+            d = c - mu
+            return ((d @ P) * d).sum(dim=1)
+        return chunked_apply(fn, self._unit(feats), device, n_ref=P.shape[0])
+
+
+class DetectorLogitGap:
+    """LogitGap (NeurIPS 2025, "Revisiting Logit Distributions for Reliable OOD
+    Detection"). Base score (Eq. 4): the mean gap between the largest logit and
+    every other logit,
+
+        S_LogitGap = (1/(K-1)) * sum_{j>=2} (z'_(1) - z'_(j)),
+
+    logits sorted descending. ID predictions are peaked -> large gap, so the OOD
+    score is the NEGATED gap. Logit-only, training-free. The paper's optional
+    top-N logit selection (Eq. 10) tunes N by maximising the ID/OOD separation of
+    the mean non-max logit using ~100 ID samples and *synthesised* OOD; that
+    synthesis is dataset-specific and is NOT reproduced here. We implement the
+    faithful base score over all logits and expose `top_n` for manual
+    restriction. NOTE: with a narrow head (e.g. the hybrid detector's K=2) this
+    reduces to the plain logit margin and loses the selection benefit — it is
+    most informative on the wide ResNet head."""
+    def __init__(self, top_n=None): self.top_n = top_n
+    def fit(self, feats, logits): pass
+    def score(self, feats, logits):
+        device, n = _device(), self.top_n
+        def fn(c):
+            cs, _ = torch.sort(c, dim=1, descending=True)
+            top = cs[:, :n] if n else cs
+            if top.shape[1] < 2:
+                return torch.zeros(top.shape[0], device=top.device)
+            gap = (top[:, :1] - top[:, 1:]).mean(dim=1)   # (1/(K-1)) sum (z1 - zj)
+            return -gap                                    # higher = more OOD
+        L = np.ascontiguousarray(_np(logits), np.float32)
+        return chunked_apply(fn, L, device, n_ref=L.shape[1])
+
+
 def evaluate_representation(rep_name, rep_dir, limit=None):
     detectors = {
         # classic / established post-hoc baselines
@@ -587,8 +655,11 @@ def evaluate_representation(rep_name, rep_dir, limit=None):
         "fDBD": DetectorFDBD(),
         "NECO": DetectorNECO(),
         "NNGuide": DetectorNNGuide(),
+        # 2025 additions
+        "Mahalanobis++": DetectorMahalanobisPP(),
+        "LogitGap": DetectorLogitGap(),
     }
-    
+
     clean_path = rep_dir / "clean.pt"
     if not clean_path.exists():
         print(f"Skipping {rep_name}, clean.pt not found.")

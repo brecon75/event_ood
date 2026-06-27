@@ -91,7 +91,7 @@ def _maha_d2(x, mu, P):
 
 class MDD:
     def __init__(self, k_pca=64, k_nn=64, n_ref=15000, use_spatial=True,
-                 use_emp_radius=True, fusion_alpha=0.5):
+                 use_emp_radius=True, fusion_alpha=0.5, maha_pp=False):
         self.k_pca = k_pca
         self.k_nn = k_nn
         # n_ref is IGNORED outside --fast: the RCF reference uses the FULL clean
@@ -106,6 +106,14 @@ class MDD:
         # / Docs/mdd_improvements.md. fusion_alpha=0 -> plain max (legacy).
         self.use_emp_radius = use_emp_radius
         self.fusion_alpha = float(fusion_alpha)
+        # Mahalanobis++ (Müller et al., ICML 2025): L2-normalise features onto the
+        # unit sphere before the covariance-SHAPE Mahalanobis sub-branches
+        # (emp-cov radius, L4, spatial), tightening the shared-covariance Gaussian
+        # fit by removing feature-norm variation. Off by default so the validated
+        # numbers in the docstring are unchanged; opt-in A/B knob. NOT applied to
+        # the isotropic radius energy or RCF — those ARE norm detectors and
+        # normalising their input would erase their signal.
+        self.maha_pp = bool(maha_pp)
         self._fitted = False
 
     # ------------------------------------------------------------------ fit
@@ -142,9 +150,10 @@ class MDD:
         # washes out. Pre-standardized on the calib split so the max() in
         # _branches_raw combines two comparable scales before the final calibration.
         if self.use_emp_radius:
-            self.emp_mu = Zfit.mean(0).astype(np.float32)
-            self.emp_P = np.linalg.pinv(np.cov(Zfit.T)).astype(np.float32)
-            emp_cal = _maha_d2(self._project(phi_calib), self.emp_mu, self.emp_P)
+            Zemp = self._mpp(Zfit)
+            self.emp_mu = Zemp.mean(0).astype(np.float32)
+            self.emp_P = np.linalg.pinv(np.cov(Zemp.T)).astype(np.float32)
+            emp_cal = _maha_d2(self._mpp(self._project(phi_calib)), self.emp_mu, self.emp_P)
             self.emp_cal_m = float(np.mean(emp_cal))
             self.emp_cal_s = float(np.std(emp_cal) + 1e-9)
 
@@ -158,7 +167,7 @@ class MDD:
 
         # L4 deep-layer Mahalanobis
         self.l4_cols = l4_columns(D)
-        self.l4_mu, self.l4_P = _ledoit_wolf(phi_fit[:, self.l4_cols])
+        self.l4_mu, self.l4_P = _ledoit_wolf(self._mpp(phi_fit[:, self.l4_cols]))
 
         # optional spatial branch
         self.has_spatial = bool(self.use_spatial and phi_spatial_fit is not None)
@@ -166,7 +175,7 @@ class MDD:
             ps = self._sanitize_spatial(phi_spatial_fit)
             self.sp_mu_f = ps.mean(0).astype(np.float32)
             self.sp_sd_f = (ps.std(0) + 1e-9).astype(np.float32)
-            self.sp_mu, self.sp_P = _ledoit_wolf((ps - self.sp_mu_f) / self.sp_sd_f)
+            self.sp_mu, self.sp_P = _ledoit_wolf(self._mpp((ps - self.sp_mu_f) / self.sp_sd_f))
 
         # calibrate each branch's scale on held-out clean
         self._fitted = True
@@ -177,6 +186,16 @@ class MDD:
         return self
 
     # -------------------------------------------------------------- internals
+    def _mpp(self, x):
+        """Mahalanobis++ unit-sphere projection (no-op unless maha_pp is on).
+
+        Applied to the inputs of the covariance-shape Mahalanobis sub-branches so
+        fit and score normalise identically. eps guards a true zero-norm row."""
+        if not getattr(self, "maha_pp", False):
+            return x
+        x = np.asarray(x, np.float32)
+        return x / (np.linalg.norm(x, axis=1, keepdims=True) + 1e-9)
+
     def _project(self, x):
         mean_t = torch.from_numpy(self.pca_mean).to(DEVICE)
         comps_t = torch.from_numpy(self.pca_comps).to(DEVICE)
@@ -213,7 +232,7 @@ class MDD:
         if getattr(self, "use_emp_radius", False):
             # OR the isotropic energy with the (pre-standardized) empirical-cov
             # Mahalanobis so the radius branch also fires on covariance rotations.
-            emp = (_maha_d2(Z, self.emp_mu, self.emp_P) - self.emp_cal_m) / self.emp_cal_s
+            emp = (_maha_d2(self._mpp(Z), self.emp_mu, self.emp_P) - self.emp_cal_m) / self.emp_cal_s
             radius = np.maximum(radius, emp)
         out = {
             "radius": radius,
@@ -221,7 +240,7 @@ class MDD:
             "l4": _maha_d2(phi[:, self.l4_cols], self.l4_mu, self.l4_P),
         }
         if getattr(self, "has_spatial", False) and phi_spatial is not None:
-            out["spatial"] = _maha_d2(self._std_spatial(phi_spatial), self.sp_mu, self.sp_P)
+            out["spatial"] = _maha_d2(self._mpp(self._std_spatial(phi_spatial)), self.sp_mu, self.sp_P)
         return out
 
     @staticmethod

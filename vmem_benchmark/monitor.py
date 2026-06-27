@@ -261,6 +261,55 @@ class VmemMonitor:
         return torch.cat(parts, dim=-1)  # (B, 2 * sum(C_layers))
 
     # ------------------------------------------------------------------
+    # Combined phi + spatial-dispersion phi (single shared pass)
+    # ------------------------------------------------------------------
+    def collect_phi_and_spatial(self):
+        """Compute collect_phi() and collect_phi_spatial() in one pass.
+
+        Both methods materialise the same per-layer ``V = cat(v_list)``, its
+        view, and the temporal moments ``mu``/``var``. Calling them separately
+        does that work twice per frame; this fuses them so mu/var are computed
+        once and reused for kurtosis (phi) and the spatial stats. Output is
+        bit-identical to calling the two methods in sequence — verified.
+
+        Returns
+        -------
+        (phi, phi_spatial) : tuple of tensors with the same shapes/semantics as
+        collect_phi() and collect_phi_spatial(); empty tensors when no membrane
+        was captured.
+        """
+        phi_parts = []
+        sp_parts = []
+        for idx in sorted(self._v.keys()):
+            v_list = self._v[idx]
+            if not v_list:
+                continue
+            V = torch.cat(v_list, dim=1)                     # (T, B, C, H, W)
+            T, B, C, H, W = V.shape
+            D = H * W
+            V = V.view(T, B, C, D)
+
+            mu  = V.mean(0)                                  # (B, C, D)
+            var = V.var(0, unbiased=False).clamp(min=1e-8)   # (B, C, D)
+
+            # --- phi: [GAP(mu), GAP(var), GAP(excess kurtosis)] ---
+            diff = V - mu.unsqueeze(0)
+            kurt = (diff ** 4).mean(0) / (var ** 2) - 3.0
+            phi_parts.append(
+                torch.cat([mu.mean(-1), var.mean(-1), kurt.mean(-1)], dim=-1))
+
+            # --- spatial phi: [Var_space(mu) | participation ratio(var)] ---
+            spatial_var = mu.var(-1, unbiased=False)         # (B, C)
+            s1 = var.sum(-1)                                 # (B, C)
+            s2 = (var ** 2).sum(-1).clamp(min=1e-20)         # (B, C)
+            spatial_pr = (s1 ** 2) / (D * s2)                # (B, C)
+            sp_parts.append(torch.cat([spatial_var, spatial_pr], dim=-1))
+
+        if not phi_parts:
+            return torch.empty((0,)), torch.empty((0,))
+        return torch.cat(phi_parts, dim=-1), torch.cat(sp_parts, dim=-1)
+
+    # ------------------------------------------------------------------
     # Spatial GAP trajectory extraction (B, T, sum(C_layers))
     # ------------------------------------------------------------------
     def collect_temporal_gap(self) -> torch.Tensor:

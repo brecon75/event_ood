@@ -62,9 +62,9 @@ def load_model(device: str = cfg.DEVICE):
     The checkpoint is loaded with strict=False so extra/missing keys
     (e.g. LSTM legacy renames) don't raise.
     """
-    # Build a minimal Hydra-compatible config using the gen1 val config
+    # Build a minimal Hydra-compatible config using the cfg.DATASET val config
     hydra_cfg = OmegaConf.load(cfg.HYBRID_DIR / "config" / "val.yaml")
-    dataset_cfg = OmegaConf.load(cfg.HYBRID_DIR / "config" / "dataset" / "gen1.yaml")
+    dataset_cfg = OmegaConf.load(cfg.HYBRID_DIR / "config" / "dataset" / f"{cfg.DATASET}.yaml")
     dataset_base_cfg = OmegaConf.load(cfg.HYBRID_DIR / "config" / "dataset" / "base.yaml")
     dataset_cfg = OmegaConf.merge(dataset_base_cfg, dataset_cfg)
 
@@ -77,7 +77,7 @@ def load_model(device: str = cfg.DEVICE):
     model_cfg = OmegaConf.merge(model_cfg, default_model_cfg.model)
 
     # Find the experiment override if present
-    experiment_dir = cfg.HYBRID_DIR / "config" / "experiment" / "gen1"
+    experiment_dir = cfg.HYBRID_DIR / "config" / "experiment" / cfg.DATASET
     experiment_cfg = OmegaConf.create({})
     if experiment_dir.exists():
         small_yaml = experiment_dir / "small.yaml"

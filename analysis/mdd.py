@@ -24,6 +24,11 @@ Branches (each standardized on held-out clean, so a plain max is a true OR):
   B4 spatial : (optional, only when phi_spatial is available) Ledoit-Wolf
                Mahalanobis on the spatial-dispersion features GAP discards ->
                the per-frame detector for spatial_dropout / event_flood
+  B5 ssb     : (opt-in, use_ssb=True + phi_synth at fit) linear logistic head vs
+               SIMULATED corruptions of fit-side sequences (CutPaste-style
+               self-supervision, no real corruption labels) -> cancels the
+               scene-activity nuisance axis that hides spatial_dropout; one dot
+               product per frame (see __init__ comment)
 
 IMPROVEMENTS (validated 2026-06-23, NOW WIRED IN below; default on, each toggleable;
 full writeup + experiment timeline in Docs/mdd_improvements.md). Two changes target
@@ -91,7 +96,9 @@ def _maha_d2(x, mu, P):
 
 class MDD:
     def __init__(self, k_pca=64, k_nn=64, n_ref=15000, use_spatial=True,
-                 use_emp_radius=True, fusion_alpha=0.5, maha_pp=False):
+                 use_emp_radius=True, fusion_alpha=0.5, maha_pp=False,
+                 use_rptm=False, rptm_m=512, rptm_q=0.05, rptm_seed=0,
+                 use_ssb=False, ssb_cap=150000, ssb_l2=1.0, ssb_fold=False):
         self.k_pca = k_pca
         self.k_nn = k_nn
         # n_ref is IGNORED outside --fast: the RCF reference uses the FULL clean
@@ -114,12 +121,63 @@ class MDD:
         # the isotropic radius energy or RCF — those ARE norm detectors and
         # normalising their input would erase their signal.
         self.maha_pp = bool(maha_pp)
+        # RPTM (Random-Projection copula Tail-Mass): a distribution-free, opt-in
+        # alternative to the empirical-covariance Mahalanobis term of the radius
+        # branch. Whitens the PCA-k manifold, projects it onto `rptm_m` random
+        # directions, and scores the two-sided rank TAIL-MASS (fraction of a frame's
+        # projections landing outside the clean [q,1-q] band). A polarity_flip
+        # ROTATES the clean covariance; whitening turns that rotation into
+        # per-direction rank deviations that tail-mass reads off with NO covariance
+        # inversion and NO kNN. When on it SUPERSEDES use_emp_radius as the radius
+        # branch's second term, reusing the branch's existing SVD basis.
+        #
+        # Verdict (window-64 head-to-head, all severities; Docs/mdd_rptm.md): the
+        # RADIUS BRANCH gets strictly stronger and covariance-free (L5 jitter
+        # 0.78->0.86, rate_shift 0.89->0.91) and the polarity_flip residual improves
+        # (fused L5 0.579->0.591); at the FUSED level it is a WASH (+0.0007 mean,
+        # 6 win / 4 tie / 8 loss) because rcf/l4/spatial already overlap. It is
+        # cheaper than RCF but NOT cheaper than emp-cov, and it cannot replace RCF
+        # (RCF still owns spatial_dropout). Default OFF so shipped/paper numbers are
+        # unchanged; flip on for the covariance-free radius + the polarity gain.
+        self.use_rptm = bool(use_rptm)
+        self.rptm_m = int(rptm_m)
+        self.rptm_q = float(rptm_q)
+        self.rptm_seed = int(rptm_seed)
+        # SSB (Synthetic-corruption Self-supervised Branch), opt-in, default OFF.
+        # A linear logistic head separating clean fit frames from `phi_synth` —
+        # phi of a KNOWN corruption simulator applied to fit-side sequences
+        # (CutPaste/DRAEM-style self-supervision: no real test corruption or label
+        # is ever seen; the simulator is the repo's own event_corruption library).
+        # Motivation (2026-07-10 oracle probe): spatial_dropout IS linearly
+        # decodable from phi on held-out scenes (LR 0.87 / MLP 0.91) but its
+        # signature lies ALONG the scene-activity nuisance axis (clean-vs-clean
+        # null AUROC 0.755, direction dominated by L4:mu), so clean-only distance
+        # scores cannot see it — a paired same-scene contrast cancels the nuisance
+        # axis by construction. Inference cost is one 2112-D dot product per frame
+        # (~2k MACs, vs ~1M for the RCF kNN): latency-negligible. Requires passing
+        # `phi_synth` to fit(); scored one-sided (logit, higher = corruption-like)
+        # and calibrated on held-out clean like every other branch.
+        self.use_ssb = bool(use_ssb)
+        self.ssb_cap = int(ssb_cap)
+        self.ssb_l2 = float(ssb_l2)
+        # ssb_fold: fold the calibrated ssb score INTO the spatial branch via max
+        # instead of exposing a 5th branch. Keeps the branch count at 4 so the
+        # studentized median is unchanged; the 2026-07-10 sweep found this equal
+        # or slightly better than the 5-branch fusion at every alpha (per-seq L5
+        # dropout 0.854 vs 0.846 at alpha=1.0). With ssb on, alpha=1.0 is the
+        # sweep's Pareto point (alpha still trades polarity vs dropout).
+        self.ssb_fold = bool(ssb_fold)
         self._fitted = False
 
     # ------------------------------------------------------------------ fit
-    def fit(self, phi_fit, phi_calib, phi_spatial_fit=None, phi_spatial_calib=None):
+    def fit(self, phi_fit, phi_calib, phi_spatial_fit=None, phi_spatial_calib=None,
+            phi_synth=None):
         """Fit on clean `phi_fit`; calibrate branch scales on disjoint clean
-        `phi_calib`. Both must be held out of the eval negatives."""
+        `phi_calib`. Both must be held out of the eval negatives.
+
+        `phi_synth` (optional, used only when use_ssb=True): phi rows of a
+        corruption SIMULATOR applied to fit/calib-side sequences — never eval
+        scenes, never real test corruptions. Enables the SSB linear head."""
         phi_fit = np.asarray(phi_fit, dtype=np.float32)
         D = phi_fit.shape[1]
 
@@ -136,8 +194,11 @@ class MDD:
         k = max(1, min(self.k_pca, D, len(std_fit) - 1))
         sub = torch.from_numpy(_cap_subset(std_fit, 20000)).float().to(DEVICE)
         self.pca_mean = sub.mean(0).cpu().numpy().astype(np.float32)
-        _, _, Vh = torch.linalg.svd(sub - sub.mean(0), full_matrices=False)
+        _, S, Vh = torch.linalg.svd(sub - sub.mean(0), full_matrices=False)
         self.pca_comps = Vh[:k].cpu().numpy().astype(np.float32)   # (k, D)
+        # per-component std (whitening scale for RPTM); free from the same SVD.
+        self.pca_sv = ((S[:k] / np.sqrt(len(sub))).clamp_min(1e-6)
+                       .cpu().numpy().astype(np.float32))
 
         Zfit = self._project(phi_fit)
         rfit = np.linalg.norm(Zfit, axis=1) + 1e-9
@@ -149,13 +210,30 @@ class MDD:
         # the covariance ROTATION polarity_flip induces, which Ledoit-Wolf shrinkage
         # washes out. Pre-standardized on the calib split so the max() in
         # _branches_raw combines two comparable scales before the final calibration.
-        if self.use_emp_radius:
+        if self.use_emp_radius and not self.use_rptm:
             Zemp = self._mpp(Zfit)
             self.emp_mu = Zemp.mean(0).astype(np.float32)
             self.emp_P = np.linalg.pinv(np.cov(Zemp.T)).astype(np.float32)
             emp_cal = _maha_d2(self._mpp(self._project(phi_calib)), self.emp_mu, self.emp_P)
             self.emp_cal_m = float(np.mean(emp_cal))
             self.emp_cal_s = float(np.std(emp_cal) + 1e-9)
+
+        # RPTM: distribution-free replacement for the emp-cov radius term. Draw
+        # rptm_m random directions in whitened PCA-k space, sort the clean
+        # projections per direction (the whole "model"), and pre-standardize the
+        # two-sided tail-mass on the calib split so max() in _branches_raw combines
+        # comparable scales. Supersedes emp-cov when use_rptm is on.
+        if self.use_rptm:
+            rng = np.random.default_rng(self.rptm_seed)
+            m = min(self.rptm_m, max(1, k))
+            W = rng.standard_normal((k, self.rptm_m)).astype(np.float32)
+            W /= (np.linalg.norm(W, axis=0, keepdims=True) + 1e-12)
+            self.rptm_W = W
+            Pfit = (Zfit / self.pca_sv) @ W               # (n, rptm_m)
+            self.rptm_ref = np.sort(Pfit, axis=0).astype(np.float32)   # sorted per dir
+            rp_cal = self._rptm(self._project(phi_calib))
+            self.rptm_cal_m = float(np.mean(rp_cal))
+            self.rptm_cal_s = float(np.std(rp_cal) + 1e-9)
 
         # RCF reference (directions + radii on the FULL clean set; _subsample is
         # a no-op outside --fast, so self.n_ref does not cap the reference here).
@@ -164,6 +242,22 @@ class MDD:
         rref = np.linalg.norm(Zref, axis=1) + 1e-9
         self.ref_dir = (Zref / rref[:, None]).astype(np.float32)
         self.ref_r = rref.astype(np.float32)
+
+        # SSB: linear logistic head, clean fit frames vs synthetic-corruption
+        # frames, in the SAME per-feature standardization as the other branches.
+        # Cap both classes so the (convex) fit stays bounded at full scale.
+        self.has_ssb = bool(self.use_ssb and phi_synth is not None)
+        if self.has_ssb:
+            from analysis.gpu_fit import logreg_fit
+            syn = (np.asarray(phi_synth, np.float32) - self.mu_f) / self.sd_f
+            neg = _cap_subset(std_fit, self.ssb_cap)
+            pos = _cap_subset(syn, self.ssb_cap)
+            Xs = np.concatenate([neg, pos], axis=0)
+            ys = np.concatenate([np.zeros(len(neg), np.float32),
+                                 np.ones(len(pos), np.float32)])
+            clf = logreg_fit(Xs, ys, op="MDD SSB logistic head", l2=self.ssb_l2)
+            self.ssb_w = clf.coef_[0].astype(np.float32)
+            self.ssb_b = float(clf.intercept_[0])
 
         # L4 deep-layer Mahalanobis
         self.l4_cols = l4_columns(D)
@@ -224,12 +318,36 @@ class MDD:
         out = chunked_apply(fn, u, DEVICE, n_ref=ref_dir.shape[0])  # (N, 2)
         return np.abs(r - out[:, 0]) / out[:, 1]
 
+    def _rptm(self, Z):
+        """Two-sided rank tail-mass over the whitened random projections.
+
+        `Z` is the PCA projection (N, k). Whitens it, projects onto the fixed
+        random directions, ranks each projection against its sorted clean column,
+        and returns the fraction of a frame's projections landing in the clean
+        tails (u < q or u > 1-q). Distribution-free; no covariance, no kNN."""
+        q = self.rptm_q
+        ref_t = torch.from_numpy(self.rptm_ref).to(DEVICE).T.contiguous()  # (m, Nref)
+        Nref = ref_t.shape[1]
+        W = torch.from_numpy(self.rptm_W).to(DEVICE)                       # (k, m)
+        sv = torch.from_numpy(self.pca_sv).to(DEVICE)                      # (k,)
+        def fn(zc):
+            P = (zc / sv) @ W                                             # (chunk, m)
+            u = torch.searchsorted(ref_t, P.T.contiguous(), right=True).float() / (Nref + 1.0)
+            return ((u > 1 - q) | (u < q)).float().mean(0)               # (chunk,)
+        return chunked_apply(fn, np.ascontiguousarray(Z, np.float32), DEVICE, n_ref=Nref)
+
     def _branches_raw(self, phi, phi_spatial=None):
         phi = np.asarray(phi, dtype=np.float32)
         Z = self._project(phi)
         r = np.linalg.norm(Z, axis=1)
         radius = np.abs(r - self.rg_mu) / self.rg_sd
-        if getattr(self, "use_emp_radius", False):
+        if getattr(self, "use_rptm", False):
+            # OR the isotropic energy with the distribution-free RPTM tail-mass so
+            # the radius branch fires on covariance rotations (polarity_flip) with
+            # no covariance inversion — supersedes the emp-cov term.
+            rp = (self._rptm(Z) - self.rptm_cal_m) / self.rptm_cal_s
+            radius = np.maximum(radius, rp)
+        elif getattr(self, "use_emp_radius", False):
             # OR the isotropic energy with the (pre-standardized) empirical-cov
             # Mahalanobis so the radius branch also fires on covariance rotations.
             emp = (_maha_d2(self._mpp(Z), self.emp_mu, self.emp_P) - self.emp_cal_m) / self.emp_cal_s
@@ -241,6 +359,10 @@ class MDD:
         }
         if getattr(self, "has_spatial", False) and phi_spatial is not None:
             out["spatial"] = _maha_d2(self._mpp(self._std_spatial(phi_spatial)), self.sp_mu, self.sp_P)
+        if getattr(self, "has_ssb", False):
+            # one 2112-D dot product per frame; one-sided logit (higher = more
+            # like the simulated corruption), calibrated like every branch.
+            out["ssb"] = ((phi - self.mu_f) / self.sd_f) @ self.ssb_w + self.ssb_b
         return out
 
     @staticmethod
@@ -265,7 +387,10 @@ class MDD:
             raise RuntimeError("MDD.score_branches called before fit().")
         B = self._branches_raw(phi, phi_spatial)
         cal = {k: (v - self.cal_mean[k]) / self.cal_std[k] for k, v in B.items()}
-        stack = np.stack([cal[k] for k in B], axis=1)
+        if (getattr(self, "has_ssb", False) and getattr(self, "ssb_fold", False)
+                and "ssb" in cal and "spatial" in cal):
+            cal["spatial"] = np.maximum(cal["spatial"], cal.pop("ssb"))
+        stack = np.stack(list(cal.values()), axis=1)
         mx = np.max(stack, axis=1)
         a = getattr(self, "fusion_alpha", 0.0)
         cal["fused"] = mx - a * np.median(stack, axis=1) if a else mx

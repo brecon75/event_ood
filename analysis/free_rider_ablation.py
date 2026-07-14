@@ -56,20 +56,31 @@ def atomic_save(obj, path):
     tmp.replace(path)
 
 
+def _run_snn_stem(backbone, padded):
+    """Run only the SNN stem (features_01 + features_23); ~1.8x faster, phi bit-identical."""
+    x = torch.cat(
+        (padded[:, 0:10, :, :].unsqueeze(2), padded[:, 10:, :, :].unsqueeze(2)),
+        dim=2,
+    )
+    x = backbone.features_01(x)
+    backbone.features_23(x)
+
+
 def extract_snn_phi(module, backbone, monitor, hist_torch, device, desc="Extracting Vmem", batch_size=1):
     functional.reset_net(backbone)
     monitor.reset()
     seq_phi = []
     n_frames = hist_torch.shape[0]
-    h_c = {0: None, 1: None}
 
     pbar = tqdm(range(0, n_frames, batch_size), desc=desc, leave=False)
     for j in pbar:
         batch_end = min(j + batch_size, n_frames)
-        batch = hist_torch[j:batch_end].to(device).float()
+        batch = hist_torch[j:batch_end].to(device, non_blocking=True).float()
+        padded = module.input_padder.pad_tensor_ev_repr(batch)
         functional.reset_net(backbone)
+        monitor.reset()
         with torch.no_grad():
-            _, h_c = module.mdl.forward_backbone(x=batch, h_c=h_c)
+            _run_snn_stem(backbone, padded)
         phi_batch = monitor.collect_phi()
         monitor.reset()
         if phi_batch.numel() > 0:
@@ -157,10 +168,32 @@ def load_trained_phi(run_name, max_seq):
     return materialize_f32(sliced), (k if k is not None else "all")
 
 
-def compute_raw_run(seq_dirs, c_name, severity):
-    """Raw-input moment stats over the first len(seq_dirs) sequences (live)."""
-    parts = []
-    for i, seq_dir in enumerate(seq_dirs):
+def compute_raw_run(seq_dirs, c_name, severity, run_name):
+    """Raw-input moment stats over the first len(seq_dirs) sequences.
+
+    Cached + resumable, mirroring extract_random_run: writes
+    phi/seq_lens/done_seqs to outputs/phi/raw_<run>.pt with per-sequence
+    checkpoints under a tmp dir, so a crash mid-run resumes instead of
+    restarting and reruns are free. The corruption seed is deterministic
+    (seed=[42, i]) so the cache is valid across invocations."""
+    out_path = cfg.PHI_DIR / f"raw_{run_name}.pt"
+    tmp_dir = cfg.PHI_DIR / f"_tmp_raw_{run_name}"
+    needed = set(range(len(seq_dirs)))
+
+    # Fully cached already?
+    if out_path.exists():
+        ex = torch.load(out_path, map_location="cpu", weights_only=True)
+        if needed.issubset(set(ex.get("done_seqs", []))):
+            sliced, _ = _slice_first_seqs(ex["phi"].float(), ex.get("seq_lens"), len(seq_dirs))
+            return sliced.numpy()
+
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    # Recover any per-seq checkpoints from a previous crashed/partial run.
+    done = {int(f.stem.split("_")[1]) for f in tmp_dir.glob("seq_*.pt")}
+
+    for i, seq_dir in enumerate(tqdm(seq_dirs, desc=f"Raw {run_name}", leave=False)):
+        if i in done:
+            continue
         try:
             hist_np, _ = load_histogram(seq_dir)
         except Exception as e:
@@ -169,10 +202,32 @@ def compute_raw_run(seq_dirs, c_name, severity):
         h = torch.from_numpy(hist_np)
         if c_name is not None:
             h = apply_corruption_to_tensor(h, c_name, severity, seed=[42, i])
-        parts.append(extract_raw_input_stats(h))
+        phi = extract_raw_input_stats(h)
+        atomic_save({"phi": phi, "idx": i}, tmp_dir / f"seq_{i}.pt")
+
+    # Merge per-seq checkpoints in sequence-index order.
+    seq_files = sorted(tmp_dir.glob("seq_*.pt"), key=lambda f: int(f.stem.split("_")[1]))
+    parts, seq_lens, done_seqs = [], [], []
+    for f in seq_files:
+        d = torch.load(f, map_location="cpu", weights_only=True)
+        parts.append(d["phi"])
+        seq_lens.append(int(d["phi"].shape[0]))
+        done_seqs.append(int(d["idx"]))
     if not parts:
         return np.empty((0, 0))
-    return torch.cat(parts, dim=0).numpy()
+    phi_all = torch.cat(parts, dim=0)
+    atomic_save({"phi": phi_all, "seq_lens": seq_lens, "done_seqs": done_seqs}, out_path)
+
+    # Clean up the tmp checkpoints now that the merged file is written.
+    for f in seq_files:
+        f.unlink()
+    try:
+        tmp_dir.rmdir()
+    except OSError:
+        pass
+
+    sliced, _ = _slice_first_seqs(phi_all.float(), seq_lens, len(seq_dirs))
+    return sliced.numpy()
 
 
 def extract_random_run(module, backbone, monitor, run_name, c_name, severity, seq_dirs, device):
@@ -297,6 +352,8 @@ def main():
           f"severities={severities}")
     print("======================================================\n")
 
+    torch.backends.cudnn.benchmark = True  # fixed 240x304 input shape — amortises kernel selection
+
     input_dir = cfg.GEN1_ROOT / cfg.SPLIT
     if not input_dir.exists():
         # Allow --gen1-root to point directly AT the test split (test-only data):
@@ -342,7 +399,7 @@ def main():
     # ------------------------------------------------------------------
     print("[Clean] Loading trained clean phi (cache) + computing raw clean stats...")
     clean_trained, n_tr = load_trained_phi("clean", max_seq)
-    clean_raw = compute_raw_run(seq_dirs, None, 0)
+    clean_raw = compute_raw_run(seq_dirs, None, 0, "clean")
     if n_tr != "all" and n_tr < len(seq_dirs):
         print(f"  [note] trained cache only covers {n_tr} seq(s); "
               f"trained condition runs on fewer sequences than raw/random.")
@@ -376,7 +433,7 @@ def main():
 
         tr, _ = load_trained_phi(run_name, max_seq)
         rd = extract_random_run(module, backbone, monitor, run_name, c, sev, seq_dirs, device)
-        rw = compute_raw_run(seq_dirs, c, sev)
+        rw = compute_raw_run(seq_dirs, c, sev, run_name)
 
         cond_X = {"Trained SNN": tr, "Random SNN": rd, "Raw Input Stats": rw}
         for cond, X in cond_X.items():

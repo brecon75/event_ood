@@ -43,13 +43,19 @@ def _auroc_row(corruption, severity, branch, clean_s, corr_s, granularity):
             "n_clean": len(clean_s), "n_corrupt": len(corr_s)}
 
 
-def _fused(branch_dict, keys):
-    return np.max(np.stack([branch_dict[k] for k in keys], axis=1), axis=1)
+def _fused(branch_dict, keys, alpha=0.5):
+    """Fused score over `keys` using the SHIPPED studentized max
+    (max - alpha*median), identical to MDD.score_branches. alpha=0 restores the
+    legacy plain max. Callers pass mdd.fusion_alpha so per-branch / leave-one-out
+    tables report the deployed detector, not the plain-max baseline."""
+    stack = np.stack([branch_dict[k] for k in keys], axis=1)
+    mx = np.max(stack, axis=1)
+    return mx - alpha * np.median(stack, axis=1) if alpha else mx
 
 
 def main():
     print("Evaluating MDD (Manifold-Decomposition Detector)...")
-    all_phi = LazyPhiDict()
+    all_phi = LazyPhiDict(cache_size=1)
     if "clean" not in all_phi:
         print(f"Error: clean.pt missing from {cfg.PHI_DIR}. Run extract.py first.")
         return
@@ -84,6 +90,8 @@ def main():
     clean_branches = mdd.score_branches(phi_eval, sp_eval)
     clean_branches.pop("fused", None)
     eval_seq_lens = seq_lens_after_cut(clean_seq_lens, cut)
+    # Free large clean arrays — no longer needed after this point
+    del clean, clean_spatial, phi_fit, phi_cal, phi_eval, sp_fit, sp_cal, sp_eval
 
     per_frame, per_seq = [], []
     present = _get_present(all_phi)
@@ -92,16 +100,20 @@ def main():
     print(f"Scoring MDD on {len(runs)} corruption runs...")
 
     for run in tqdm(runs, desc="MDD scoring"):
-        phi = all_phi[run]
-        sp = all_phi.get_phi_spatial(run) if use_spatial else None
+        phi_full = all_phi[run]
+        sp_full = all_phi.get_phi_spatial(run) if use_spatial else None
         # Positives = held-out tail of the run only, drawn from the same
         # sequences as the clean negatives (phi_eval). Cut at the same
         # sequence-aligned boundary as clean so the train-portion frames (whose
         # clean twins the MDD was fitted/calibrated on) are excluded.
         run_seq_lens_full = all_phi.get_seq_lens(run)
-        run_cut = split_boundary(len(phi), TRAIN_RATIO, run_seq_lens_full)
-        phi = phi[run_cut:]
-        sp = sp[run_cut:] if sp is not None else None
+        run_cut = split_boundary(len(phi_full), TRAIN_RATIO, run_seq_lens_full)
+        # Contiguous copies of just the held-out tail (~0.4 GB phi, ~0.3 GB spatial).
+        # Breaking the numpy view chain lets us evict the full 2.9/1.9 GB arrays now.
+        phi = np.ascontiguousarray(phi_full[run_cut:], dtype=np.float32)
+        sp = np.ascontiguousarray(sp_full[run_cut:], dtype=np.float32) if sp_full is not None else None
+        all_phi._cache.pop(run, None)
+        del phi_full, sp_full
         # per-sequence frame counts for the held-out tail (mirrors eval_seq_lens)
         run_seq_lens = seq_lens_after_cut(run_seq_lens_full, run_cut)
         corr_branches = mdd.score_branches(phi, sp)
@@ -109,8 +121,17 @@ def main():
 
         # symmetric fused: only branches present for BOTH clean and this run
         common = [k for k in mdd.branch_names if k in clean_branches and k in corr_branches]
-        clean_branches["fused"] = _fused(clean_branches, common)
-        corr_branches["fused"] = _fused(corr_branches, common)
+        clean_branches["fused"] = _fused(clean_branches, common, mdd.fusion_alpha)
+        corr_branches["fused"] = _fused(corr_branches, common, mdd.fusion_alpha)
+
+        # leave-one-out fused: drop each branch in turn (same studentized rule) to
+        # expose each branch's MARGINAL contribution / necessity. Recorded as
+        # branch "fused_no_<name>"; compare against "fused" to read the drop.
+        if len(common) > 1:
+            for drop in common:
+                keys = [k for k in common if k != drop]
+                clean_branches[f"fused_no_{drop}"] = _fused(clean_branches, keys, mdd.fusion_alpha)
+                corr_branches[f"fused_no_{drop}"] = _fused(corr_branches, keys, mdd.fusion_alpha)
 
         corruption, sev = run.rsplit("_L", 1)
         sev = int(sev)

@@ -57,8 +57,8 @@ def _score_config(params, cache, windows, use_spatial):
         corr_branches.pop("fused", None)
         common = [k for k in mdd.branch_names
                   if k in clean_branches and k in corr_branches]
-        cb_fused = _fused(clean_branches, common)
-        tb_fused = _fused(corr_branches, common)
+        cb_fused = _fused(clean_branches, common, mdd.fusion_alpha)
+        tb_fused = _fused(corr_branches, common, mdd.fusion_alpha)
         corruption, sev = run.rsplit("_L", 1)
         for W in windows:
             cs = aggregate_by_windows(cb_fused, cl["eval_seq_lens"], W)

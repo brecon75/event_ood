@@ -23,7 +23,9 @@ from pathlib import Path
 
 H5_SUBPATH  = "event_representations_v2/stacked_histogram_dt=50_nbins=10"
 LABELS_DIR  = "labels_v2"
-EXPECTED_SHAPE = (20, 240, 304)   # (C, H, W) — frame-count N varies
+EXPECTED_CHANNELS = 20   # 2 * nbins — fixed regardless of resolution
+# Gen1: (20, 240, 304). Gen4 (downsample_by_factor_2, 720x1280 -> half res): (20, 360, 640).
+H5_FILENAME_CANDIDATES = ("event_representations_ds2_nearest.h5", "event_representations.h5")
 
 
 def load_histogram(seq_dir: Path) -> tuple[np.ndarray, np.ndarray]:
@@ -32,15 +34,23 @@ def load_histogram(seq_dir: Path) -> tuple[np.ndarray, np.ndarray]:
 
     Returns
     -------
-    histogram  : (N, 20, 240, 304) uint8
-    timestamps : (N, 2)            int64  — [t_start_us, t_end_us] per frame
+    histogram  : (N, 20, H, W) uint8   — H,W depend on dataset (Gen1 240x304, Gen4 360x640)
+    timestamps : (N, 2)         int64  — [t_start_us, t_end_us] per frame
     """
     seq_dir   = Path(seq_dir)
-    h5_path   = seq_dir / H5_SUBPATH / "event_representations.h5"
-    ts_path   = seq_dir / H5_SUBPATH / "timestamps_us.npy"
+    repr_dir  = seq_dir / H5_SUBPATH
+    ts_path   = repr_dir / "timestamps_us.npy"
 
-    if not h5_path.exists():
-        raise FileNotFoundError(f"HDF5 not found: {h5_path}")
+    h5_path = None
+    for candidate in H5_FILENAME_CANDIDATES:
+        p = repr_dir / candidate
+        if p.exists():
+            h5_path = p
+            break
+    if h5_path is None:
+        raise FileNotFoundError(
+            f"HDF5 not found: tried {[str(repr_dir / c) for c in H5_FILENAME_CANDIDATES]}"
+        )
     if not ts_path.exists():
         raise FileNotFoundError(f"Timestamps not found: {ts_path}")
 
@@ -50,15 +60,26 @@ def load_histogram(seq_dir: Path) -> tuple[np.ndarray, np.ndarray]:
         ds        = f.root.data
         histogram = ds[:]           # 0.35s for full 1.62 GB sequence — fastest strategy
 
-    if histogram.shape[1:] != EXPECTED_SHAPE:
+    if histogram.shape[1] != EXPECTED_CHANNELS:
         raise ValueError(
             f"Unexpected histogram shape {histogram.shape}; "
-            f"expected (N, {EXPECTED_SHAPE[0]}, {EXPECTED_SHAPE[1]}, {EXPECTED_SHAPE[2]})"
+            f"expected (N, {EXPECTED_CHANNELS}, H, W)"
         )
 
     timestamps = np.load(ts_path)
+    # Gen1 stores (N, 2) [t_start, t_end] windows. The RVT gen4 preprocessor
+    # writes only the 1D (N,) end-timestamps, so synthesize the start column as
+    # the previous frame's end (contiguous windows, matching Gen1 semantics).
+    # The values are carried through as metadata only — none of the corruptions
+    # read them — so the exact reconstruction of frame 0's start is immaterial.
+    if timestamps.ndim == 1:
+        ends   = timestamps.astype(np.int64)
+        starts = np.empty_like(ends)
+        starts[1:] = ends[:-1]
+        starts[0]  = ends[0] - (ends[1] - ends[0] if len(ends) > 1 else 0)
+        timestamps = np.stack([starts, ends], axis=1)
     assert timestamps.ndim == 2 and timestamps.shape[1] == 2, \
-        f"timestamps_us must be (N, 2), got {timestamps.shape}"
+        f"timestamps_us must be (N, 2) or (N,), got {timestamps.shape}"
     assert len(timestamps) == len(histogram), \
         f"Frame count mismatch: histogram={len(histogram)}, timestamps={len(timestamps)}"
 

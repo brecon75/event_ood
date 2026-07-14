@@ -84,8 +84,14 @@ def _auroc_row(corruption, severity, branch, window, clean_s, corr_s):
             "n_clean": len(clean_s), "n_corrupt": len(corr_s)}
 
 
-def _fused(branch_dict, keys):
-    return np.max(np.stack([branch_dict[k] for k in keys], axis=1), axis=1)
+def _fused(branch_dict, keys, alpha=0.5):
+    """Fused score over `keys` using the SHIPPED studentized max
+    (max - alpha*median), identical to MDD.score_branches. alpha=0 restores the
+    legacy plain max. Callers pass mdd.fusion_alpha so this tracks the detector
+    default and every table reports the deployed detector."""
+    stack = np.stack([branch_dict[k] for k in keys], axis=1)
+    mx = np.max(stack, axis=1)
+    return mx - alpha * np.median(stack, axis=1) if alpha else mx
 
 
 def main():
@@ -112,7 +118,7 @@ def main():
     win_label = ["full" if w is None else w for w in windows]
     print(f"MDD window sweep over: {win_label}")
 
-    all_phi = LazyPhiDict()
+    all_phi = LazyPhiDict(cache_size=1)
     if "clean" not in all_phi:
         print(f"Error: clean.pt missing from {cfg.PHI_DIR}. Run extract.py first.")
         return
@@ -151,6 +157,8 @@ def main():
     clean_branches = mdd.score_branches(phi_eval, sp_eval)
     clean_branches.pop("fused", None)
     eval_seq_lens = seq_lens_after_cut(clean_seq_lens, cut)
+    # Free large clean arrays — no longer needed after this point
+    del clean, clean_spatial, phi_fit, phi_cal, phi_eval, sp_fit, sp_cal, sp_eval
 
     rows = []
     present = _get_present(all_phi)
@@ -164,12 +172,14 @@ def main():
     print(f"Scoring MDD on {len(runs)} corruption runs across {len(windows)} windows...")
 
     for run in tqdm(runs, desc="MDD window sweep"):
-        phi = all_phi[run]
-        sp = all_phi.get_phi_spatial(run) if use_spatial else None
+        phi_full = all_phi[run]
+        sp_full = all_phi.get_phi_spatial(run) if use_spatial else None
         run_seq_lens_full = all_phi.get_seq_lens(run)
-        run_cut = split_boundary(len(phi), TRAIN_RATIO, run_seq_lens_full)
-        phi = phi[run_cut:]
-        sp = sp[run_cut:] if sp is not None else None
+        run_cut = split_boundary(len(phi_full), TRAIN_RATIO, run_seq_lens_full)
+        phi = np.ascontiguousarray(phi_full[run_cut:], dtype=np.float32)
+        sp = np.ascontiguousarray(sp_full[run_cut:], dtype=np.float32) if sp_full is not None else None
+        all_phi._cache.pop(run, None)
+        del phi_full, sp_full
         run_seq_lens = seq_lens_after_cut(run_seq_lens_full, run_cut)
 
         corr_branches = mdd.score_branches(phi, sp)
@@ -177,8 +187,8 @@ def main():
 
         # symmetric fused: branches present for BOTH clean and this run
         common = [k for k in mdd.branch_names if k in clean_branches and k in corr_branches]
-        clean_branches["fused"] = _fused(clean_branches, common)
-        corr_branches["fused"] = _fused(corr_branches, common)
+        clean_branches["fused"] = _fused(clean_branches, common, mdd.fusion_alpha)
+        corr_branches["fused"] = _fused(corr_branches, common, mdd.fusion_alpha)
 
         corruption, sev = run.rsplit("_L", 1)
         sev = int(sev)

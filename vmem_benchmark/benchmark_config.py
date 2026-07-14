@@ -32,8 +32,13 @@ def _path(env_var: str, *default_relative: str) -> Path:
     return Path(val) if val else REPO_ROOT.joinpath(*default_relative)
 
 
+DATASET    = os.environ.get("VMEM_DATASET", "gen1")                  # "gen1" or "gen4"
 GEN1_ROOT  = _path("VMEM_GEN1_ROOT", "gen1")                          # root of the Gen1 dataset
-CKPT_PATH  = _path("VMEM_CKPT_PATH", "HybridDetection", "gen1_mAP36.ckpt")
+GEN4_ROOT  = _path("VMEM_GEN4_ROOT", "gen4")                          # root of the Gen4 dataset
+CKPT_PATH  = _path(
+    "VMEM_CKPT_PATH", "HybridDetection",
+    "gen4_mAP29.ckpt" if DATASET == "gen4" else "gen1_mAP36.ckpt",
+)
 HYBRID_DIR = _path("VMEM_HYBRID_DIR", "HybridDetection")             # repo root (for sys.path)
 
 # ---------------------------------------------------------------------------
@@ -104,7 +109,7 @@ CORRUPTIONS = [
     "spatial_dropout",
 ]
 
-SEVERITIES = [1, 2, 3, 4, 5]
+SEVERITIES = [1, 3, 5]
 
 # Gen1 split to benchmark against
 SPLIT = "test"

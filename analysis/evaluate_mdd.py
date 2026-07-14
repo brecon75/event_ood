@@ -47,7 +47,10 @@ def _fused(branch_dict, keys, alpha=0.5):
     """Fused score over `keys` using the SHIPPED studentized max
     (max - alpha*median), identical to MDD.score_branches. alpha=0 restores the
     legacy plain max. Callers pass mdd.fusion_alpha so per-branch / leave-one-out
-    tables report the deployed detector, not the plain-max baseline."""
+    tables report the deployed detector, not the plain-max baseline.
+
+    Shared with evaluate_mdd_windows.py, which imports this instead of
+    redefining it."""
     stack = np.stack([branch_dict[k] for k in keys], axis=1)
     mx = np.max(stack, axis=1)
     return mx - alpha * np.median(stack, axis=1) if alpha else mx

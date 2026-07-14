@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "vmem_benchmark"
 from vmem_benchmark import benchmark_config as cfg
 from event_corruption.pipeline.loader import load_histogram
 from vmem_benchmark.corruption_wrap import apply_corruption_to_tensor
+from analysis.vmem_utils import atomic_save
 
 def get_resnet_feature_extractor(in_channels=2):
     model = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
@@ -34,14 +35,6 @@ def get_resnet_feature_extractor(in_channels=2):
             return f, l
 
     return FeatureAndLogit(model)
-
-
-def atomic_save(obj, path):
-    """Save via a temp file + rename so a crash mid-save never leaves a
-    partial .pt that the exists()-based resume check would skip forever."""
-    tmp = path.with_name(f"_tmp_{path.name}")
-    torch.save(obj, tmp)
-    tmp.replace(path)
 
 
 @torch.no_grad()

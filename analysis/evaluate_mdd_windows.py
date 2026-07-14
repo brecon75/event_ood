@@ -37,6 +37,7 @@ from analysis.vmem_utils import (
     seq_lens_after_cut, _get_present,
 )
 from analysis.mdd import MDD
+from analysis.evaluate_mdd import _fused
 
 CALIB_FRAC = 0.15          # clean TRAIN fraction held out to calibrate branch scales
 DEFAULT_WINDOWS = [1, 8, 16, 32, 64, 128, 256, None]   # None = full sequence
@@ -82,16 +83,6 @@ def _auroc_row(corruption, severity, branch, window, clean_s, corr_s):
             "window": ("full" if window is None else window),
             "auroc": auroc, "fpr95": fpr95,
             "n_clean": len(clean_s), "n_corrupt": len(corr_s)}
-
-
-def _fused(branch_dict, keys, alpha=0.5):
-    """Fused score over `keys` using the SHIPPED studentized max
-    (max - alpha*median), identical to MDD.score_branches. alpha=0 restores the
-    legacy plain max. Callers pass mdd.fusion_alpha so this tracks the detector
-    default and every table reports the deployed detector."""
-    stack = np.stack([branch_dict[k] for k in keys], axis=1)
-    mx = np.max(stack, axis=1)
-    return mx - alpha * np.median(stack, axis=1) if alpha else mx
 
 
 def main():

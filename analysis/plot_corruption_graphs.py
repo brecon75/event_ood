@@ -54,6 +54,7 @@ from analysis.vmem_utils import (
     LazyPhiDict, TRAIN_RATIO, split_boundary, seq_lens_after_cut,
     aggregate_by_seq, auroc_fpr95, maha_d2, LAYER_SPECS, slice_phi_stat)
 from analysis.mdd import MDD, DEVICE
+from analysis.evaluate_mdd_windows import aggregate_by_windows
 
 CALIB_FRAC = 0.15
 ALPHA = 0.5                       # studentized-fusion strength of the improved MDD
@@ -76,19 +77,7 @@ def _seqauc(cs, ts, csl, tsl):
     return _auc(ca, ta) if ca is not None and ta is not None else float("nan")
 
 def _winauc(cs, ts, csl, tsl, w=W64):
-    def agg(s, sl):
-        s = np.asarray(s, np.float64)
-        if not sl or int(np.sum(sl)) != len(s):
-            return None
-        out, st = [], 0
-        for L in sl:
-            seq = s[st:st + L]; st += L
-            for i in range(0, L, w):
-                ch = seq[i:i + w]
-                if len(ch) >= max(1, w // 2):
-                    out.append(ch.mean())
-        return np.asarray(out) if out else None
-    cw, tw = agg(cs, csl), agg(ts, tsl)
+    cw, tw = aggregate_by_windows(cs, csl, w), aggregate_by_windows(ts, tsl, w)
     return _auc(cw, tw) if cw is not None and tw is not None else float("nan")
 
 def _save(fig, name):

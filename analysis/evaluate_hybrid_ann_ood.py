@@ -51,19 +51,18 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
-from sklearn.metrics import roc_auc_score, average_precision_score
 from tqdm import tqdm
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vmem_benchmark import benchmark_config as cfg
 from analysis.vmem_utils import (
-    split_train_eval, split_boundary, load_phi_seq_lens, TRAIN_RATIO,
+    split_train_eval, split_boundary, load_phi_seq_lens, TRAIN_RATIO, auroc_aupr_fpr95,
 )
 from analysis.evaluate_ann_baselines import (
     DetectorMSP, DetectorEnergy, DetectorODIN, DetectorMaxLogit, DetectorGEN,
     DetectorGradNorm, DetectorMahalanobis, DetectorKNN, DetectorNECO,
-    DetectorNNGuide, DetectorMahalanobisPP, DetectorLogitGap, calc_fpr95,
+    DetectorNNGuide, DetectorMahalanobisPP, DetectorLogitGap,
 )
 
 # Logit produced by the hybrid detection head (GAP of cls_preds[0] output).
@@ -168,17 +167,10 @@ def evaluate_feat_key(ann_dir, feat_key, limit=None):
 
         for name, det in detectors.items():
             t_scores = det.score(t_feat, t_logit)
-            y_true = np.concatenate([np.zeros(len(clean_scores[name])),
-                                     np.ones(len(t_scores))])
-            y_score = np.concatenate([clean_scores[name], t_scores])
-            if len(np.unique(y_true)) < 2:
+            metrics = auroc_aupr_fpr95(clean_scores[name], t_scores)
+            if metrics is None:
                 continue
-            try:
-                auroc = roc_auc_score(y_true, y_score)
-                aupr = average_precision_score(y_true, y_score)
-                fpr95 = calc_fpr95(y_true, y_score)
-            except Exception:
-                continue
+            auroc, aupr, fpr95 = metrics
             results.append({
                 "model": "hybrid",
                 "representation": feat_key,

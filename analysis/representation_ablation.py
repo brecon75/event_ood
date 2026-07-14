@@ -5,26 +5,15 @@ from tqdm import tqdm
 from pathlib import Path
 from collections import OrderedDict
 from collections.abc import Mapping
-from sklearn.metrics import roc_auc_score, average_precision_score, roc_curve
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vmem_benchmark import benchmark_config as cfg
 from analysis.vmem_utils import (
     slice_phi_stat, split_train_eval, held_out_eval, load_phi_seq_lens,
-    chunked_apply, device_for, load_pt, materialize_f32,
+    chunked_apply, device_for, load_pt, materialize_f32, calc_fpr95, auroc_aupr_fpr95,
 )
 from analysis.gpu_fit import empirical_precision
-
-def calc_fpr95(y_true, y_score):
-    # Guard single-class input the way vmem_utils.auroc_fpr95 does: roc_curve
-    # raises ("Only one class present") otherwise, and callers that wrap this
-    # in a bare `except: continue` would silently drop the metric.
-    if len(np.unique(y_true)) < 2:
-        return float("nan")
-    fpr, tpr, thresholds = roc_curve(y_true, y_score)
-    idx = int(np.argmax(tpr >= 0.95))
-    return float(fpr[idx])
 
 def fit_mahalanobis(train_feat):
     """Fit mean + precision once and return a score(test_feat) closure.
@@ -241,17 +230,10 @@ def main():
             test_feat = held_out_eval(test_feat, seq_lens=load_phi_seq_lens(run_name))
             corr_scores = scorer(test_feat)
 
-            y_true = np.concatenate([np.zeros(len(clean_scores)), np.ones(len(corr_scores))])
-            y_score = np.concatenate([clean_scores, corr_scores])
-
-            if len(np.unique(y_true)) < 2:
+            metrics = auroc_aupr_fpr95(clean_scores, corr_scores)
+            if metrics is None:
                 continue
-            try:
-                auroc = roc_auc_score(y_true, y_score)
-                aupr = average_precision_score(y_true, y_score)
-                fpr95 = calc_fpr95(y_true, y_score)
-            except Exception:
-                continue
+            auroc, aupr, fpr95 = metrics
 
             results.append({
                 "model": "hybrid",

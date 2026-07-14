@@ -3,7 +3,6 @@ import csv
 from pathlib import Path
 import numpy as np
 from scipy.stats import spearmanr
-from sklearn.decomposition import PCA
 
 # Fix paths for imports
 _HERE = Path(__file__).resolve().parent
@@ -17,7 +16,7 @@ from analysis.vmem_utils import (
 )
 from analysis.vmem_scorers import (
     mahalanobis_scorer, knn_scorer, gmm_scorer, pca_mahalanobis_scorer,
-    ocsvm_scorer, normalizing_flow_scorer, autoencoder_scorer
+    normalizing_flow_scorer, autoencoder_scorer
 )
 from analysis.analyse_plots import (
     _plot_per_layer_heatmap, plot_statwise_ablation,
@@ -163,7 +162,6 @@ def _build_detectors(clean_train):
         "kNN (k=5)":        knn_scorer(clean_train, k=5),
         "GMM":              gmm_scorer(clean_train, n_components=5),
         "PCA-Mahal":        pca_mahalanobis_scorer(clean_train, n_components=50),
-        # "One-Class SVM":    ocsvm_scorer(clean_train),  # disabled: O(n^2) on full data
         "Normalizing Flow": normalizing_flow_scorer(clean_train, n_components=50),
         "Autoencoder":      autoencoder_scorer(clean_train),
     }

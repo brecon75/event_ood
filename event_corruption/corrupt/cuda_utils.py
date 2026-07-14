@@ -38,34 +38,3 @@ def get_array_module(arr):
         except Exception:
             pass
     return np
-
-
-def to_gpu(arr: np.ndarray):
-    """Transfer a NumPy array to the GPU. No-op if CUDA is unavailable."""
-    if cuda_available():
-        import cupy as cp
-        return cp.asarray(arr)
-    return arr
-
-
-def to_cpu(arr) -> np.ndarray:
-    """Transfer a GPU array back to CPU NumPy. No-op if already NumPy."""
-    if cuda_available():
-        try:
-            import cupy as cp
-            if isinstance(arr, cp.ndarray):
-                return cp.asnumpy(arr)
-        except Exception:
-            pass
-    return arr
-
-
-def clear_gpu_memory():
-    """Force CuPy to release all unused memory blocks."""
-    if cuda_available():
-        try:
-            import cupy as cp
-            cp.get_default_memory_pool().free_all_blocks()
-            cp.get_default_pinned_memory_pool().free_all_blocks()
-        except Exception:
-            pass

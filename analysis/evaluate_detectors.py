@@ -13,7 +13,7 @@ from vmem_benchmark import benchmark_config as cfg
 from analysis.representation_ablation import load_all_features, extract_representation, calc_fpr95
 from analysis.vmem_utils import (
     TRAIN_RATIO, split_boundary, load_phi_seq_lens, chunked_apply, knn_score,
-    device_for, maha_d2, held_out_eval,
+    device_for, maha_d2, held_out_eval, auroc_aupr_fpr95,
 )
 from analysis.fit_detectors import SimpleAE
 from analysis.vmem_models import RealNVP
@@ -264,17 +264,10 @@ def main():
         for name, model in detectors.items():
             test_scores = SCORERS[name](model, X_test)
 
-            y_true = np.concatenate([np.zeros(len(clean_scores[name])), np.ones(len(test_scores))])
-            y_score = np.concatenate([clean_scores[name], test_scores])
-
-            if len(np.unique(y_true)) < 2:
+            metrics = auroc_aupr_fpr95(clean_scores[name], test_scores)
+            if metrics is None:
                 continue
-            try:
-                auroc = roc_auc_score(y_true, y_score)
-                aupr = average_precision_score(y_true, y_score)
-                fpr95 = calc_fpr95(y_true, y_score)
-            except Exception:
-                continue
+            auroc, aupr, fpr95 = metrics
 
             parts = run_name.rsplit('_L', 1)
             corruption = parts[0]

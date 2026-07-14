@@ -8,7 +8,7 @@ from tqdm import tqdm
 # Fix paths for imports
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent))
-from analysis.vmem_utils import LAYER_SPECS
+from analysis.vmem_utils import LAYER_SPECS, FAST_MODE
 
 class CouplingLayer(nn.Module):
     def __init__(self, dim, hidden_dim=64, flip=False):
@@ -118,47 +118,40 @@ class TemporalAutoencoder(nn.Module):
         return recon
 
 
-def train_flow_model(clean_pca, epochs=100, lr=1e-3, batch_size=128, device="cuda"):
-    fast_mode = "--fast" in sys.argv
-    if fast_mode:
-        epochs = min(epochs, 1)
-    flow = RealNVP(dim=clean_pca.shape[1]).to(device)
-    optimizer = optim.Adam(flow.parameters(), lr=lr)
-    dataset = torch.from_numpy(clean_pca).float()
-    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
-    flow.train()
-    pbar = tqdm(range(epochs), desc="Training Flow Model", leave=False, disable=epochs <= 1)
+def _train_loop(model, data, loss_fn, epochs, lr, batch_size, device, desc):
+    """Shared Adam training loop for RealNVP/AE/TemporalAE. `loss_fn(model, batch)`
+    computes the scalar loss for one device-resident batch."""
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    loader = torch.utils.data.DataLoader(data, batch_size=batch_size, shuffle=True)
+    model.train()
+    pbar = tqdm(range(epochs), desc=desc, leave=False, disable=epochs <= 1)
     for _ in pbar:
         for batch in loader:
             batch = batch.to(device)
             optimizer.zero_grad()
-            loss = -flow.log_prob(batch).mean()
+            loss = loss_fn(model, batch)
             loss.backward()
             optimizer.step()
-    flow.eval()
-    return flow
+    model.eval()
+    return model
+
+
+def train_flow_model(clean_pca, epochs=100, lr=1e-3, batch_size=128, device="cuda"):
+    if FAST_MODE:
+        epochs = min(epochs, 1)
+    flow = RealNVP(dim=clean_pca.shape[1]).to(device)
+    dataset = torch.from_numpy(clean_pca).float()
+    return _train_loop(flow, dataset, lambda m, b: -m.log_prob(b).mean(),
+                        epochs, lr, batch_size, device, "Training Flow Model")
 
 
 def train_ae_model(clean_raw, epochs=40, lr=1e-3, batch_size=128, device="cuda"):
-    fast_mode = "--fast" in sys.argv
-    if fast_mode:
+    if FAST_MODE:
         epochs = min(epochs, 1)
     ae = Autoencoder(dim=clean_raw.shape[1]).to(device)
-    optimizer = optim.Adam(ae.parameters(), lr=lr)
     dataset = torch.from_numpy(clean_raw).float()
-    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
-    ae.train()
-    pbar = tqdm(range(epochs), desc="Training Autoencoder", leave=False, disable=epochs <= 1)
-    for _ in pbar:
-        for batch in loader:
-            batch = batch.to(device)
-            optimizer.zero_grad()
-            recon = ae(batch)
-            loss = nn.MSELoss()(recon, batch)
-            loss.backward()
-            optimizer.step()
-    ae.eval()
-    return ae
+    return _train_loop(ae, dataset, lambda m, b: nn.MSELoss()(m(b), b),
+                        epochs, lr, batch_size, device, "Training Autoencoder")
 
 
 def prepare_temporal_ae_input(trajs):
@@ -173,29 +166,12 @@ def prepare_temporal_ae_input(trajs):
 
 
 def train_temporal_ae_model(clean_trajs, epochs=200, lr=1e-3, batch_size=64, device="cuda"):
-    fast_mode = "--fast" in sys.argv
-    if fast_mode:
+    if FAST_MODE:
         epochs = min(epochs, 2)
     if isinstance(clean_trajs, torch.Tensor):
         clean_x = clean_trajs
     else:
         clean_x = prepare_temporal_ae_input(clean_trajs)
     ae = TemporalAutoencoder(dim=clean_x.shape[2]).to(device)
-    optimizer = optim.Adam(ae.parameters(), lr=lr)
-    loader = torch.utils.data.DataLoader(
-        torch.utils.data.TensorDataset(clean_x),
-        batch_size=batch_size,
-        shuffle=True,
-    )
-    ae.train()
-    pbar = tqdm(range(epochs), desc="Training Temporal AE", leave=False, disable=epochs <= 1)
-    for _ in pbar:
-        for (batch,) in loader:
-            batch = batch.to(device)
-            optimizer.zero_grad()
-            recon = ae(batch)
-            loss = nn.MSELoss()(recon, batch)
-            loss.backward()
-            optimizer.step()
-    ae.eval()
-    return ae
+    return _train_loop(ae, clean_x, lambda m, b: nn.MSELoss()(m(b), b),
+                        epochs, lr, batch_size, device, "Training Temporal AE")

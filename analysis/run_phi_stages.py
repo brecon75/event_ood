@@ -61,7 +61,7 @@ _preparse_output_dir()
 from vmem_benchmark import benchmark_config as cfg
 from analysis import representation_ablation as ra
 from analysis import vmem_utils
-from analysis.vmem_utils import load_phi_seq_lens, load_phi_spatial, load_pt
+from analysis.vmem_utils import load_phi_seq_lens, load_phi_spatial, load_pt, FAST_MODE
 
 # Default fraction of *available* host RAM the resident φ cache may occupy. The
 # rest is headroom for each stage's own transient allocations (fits, GPU staging
@@ -373,7 +373,7 @@ def main():
     if cache_size < n_runs:
         print(f"  [!] residency < runs: evicted runs are re-read from disk (mmap). "
               f"Raise --max-resident if you have more RAM.")
-    if "--fast" in sys.argv:
+    if FAST_MODE:
         print("  --fast            : ON (smoke-test subsample)")
 
     # ── one shared loader, injected into every stage ──────────────────────────

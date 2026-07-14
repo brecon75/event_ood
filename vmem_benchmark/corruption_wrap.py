@@ -57,9 +57,6 @@ def apply_corruption_to_tensor(
     # 4. Return as tensor on original device
     return torch.from_numpy(corrupted_arr).to(device)
 
-def get_corruption_names():
-    return cfg.CORRUPTIONS
-
 if __name__ == "__main__":
     # Quick sanity check
     test_tensor = torch.zeros((10, 20, 240, 304), dtype=torch.uint8)

@@ -26,7 +26,9 @@ from vmem_benchmark.corruption_wrap import apply_corruption_to_tensor
 from spikingjelly.clock_driven import functional
 
 from analysis.vmem_scorers import mahalanobis_scorer
-from analysis.vmem_utils import auroc_fpr95, split_train_eval, held_out_eval, load_pt, materialize_f32
+from analysis.vmem_utils import (
+    auroc_fpr95, split_train_eval, held_out_eval, load_pt, materialize_f32, atomic_save, FAST_MODE,
+)
 from analysis.analyse_plots import plot_free_rider_ablation
 
 # ---------------------------------------------------------------------------
@@ -43,17 +45,11 @@ def resolve_max_seq():
     for i, a in enumerate(sys.argv):
         if a == "--max-seq" and i + 1 < len(sys.argv):
             m = int(sys.argv[i + 1])
-    if "--test" in sys.argv or "--fast" in sys.argv or getattr(cfg, "MAX_SEQUENCES", None) == 1:
+    if "--test" in sys.argv or FAST_MODE or getattr(cfg, "MAX_SEQUENCES", None) == 1:
         m = 1
     if m is None:
         return None  # no cap — process every sequence
     return max(1, m)
-
-
-def atomic_save(obj, path):
-    tmp = path.with_name(f"_tmp_{path.name}")
-    torch.save(obj, tmp)
-    tmp.replace(path)
 
 
 def _run_snn_stem(backbone, padded):

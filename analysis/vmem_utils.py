@@ -7,7 +7,7 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent))
 from vmem_benchmark import benchmark_config as cfg
-from sklearn.metrics import roc_auc_score, roc_curve
+from sklearn.metrics import roc_auc_score, roc_curve, average_precision_score
 
 LAYER_SPECS = [
     {"name": "SNN Block 1", "idx": 0, "C": 64},
@@ -28,6 +28,7 @@ for _s in LAYER_SPECS:
 TOTAL_PHI_DIM   = _off
 MAX_FIT_SAMPLES = 3000
 PLIF_THETA      = 1.0
+FAST_MODE       = "--fast" in sys.argv   # smoke-test mode, shared across all callers
 TRAIN_RATIO     = getattr(cfg, "CLEAN_TRAIN_RATIO", 0.7)
 TABLE_DIR       = cfg.OUTPUT_DIR / "tables"
 
@@ -52,6 +53,14 @@ def load_pt(path, mmap: bool = True):
         return torch.load(path, map_location="cpu", weights_only=True, mmap=mmap)
     except (RuntimeError, ValueError, TypeError):
         return torch.load(path, map_location="cpu", weights_only=True)
+
+
+def atomic_save(obj, path):
+    """Save via a temp file + rename so a crash mid-save never leaves a
+    partial .pt that the exists()-based resume check would skip forever."""
+    tmp = path.with_name(f"_tmp_{path.name}")
+    torch.save(obj, tmp)
+    tmp.replace(path)
 
 
 def materialize_f32(t) -> np.ndarray:
@@ -205,7 +214,7 @@ class LazyPhiDict:
         self._cache_size = max(1, cache_size)
         self._available = {f.stem: f for f in sorted(cfg.PHI_DIR.glob("*.pt"))}
         self._seq_lens = {}
-        self.fast_mode = "--fast" in sys.argv
+        self.fast_mode = FAST_MODE
 
     def __contains__(self, key):
         return key in self._available
@@ -374,6 +383,30 @@ def auroc_fpr95(y_true: np.ndarray, y_score: np.ndarray):
     fpr95 = float(fpr[idx])
     return float(auroc), fpr95
 
+def calc_fpr95(y_true: np.ndarray, y_score: np.ndarray):
+    if len(np.unique(y_true)) < 2:
+        return float("nan")
+    fpr, tpr, _ = roc_curve(y_true, y_score)
+    idx = int(np.argmax(tpr >= 0.95))
+    return float(fpr[idx])
+
+def auroc_aupr_fpr95(clean_scores: np.ndarray, corrupt_scores: np.ndarray):
+    """AUROC / AUPR / FPR@95 for one clean-vs-corrupt score comparison.
+
+    Returns (auroc, aupr, fpr95), or None if fewer than 2 classes are present
+    or a metric fails to compute — mirrors the `continue`-on-guard every
+    evaluate_*.py corruption-scoring loop used before this was consolidated."""
+    y_true = np.concatenate([np.zeros(len(clean_scores)), np.ones(len(corrupt_scores))])
+    y_score = np.concatenate([clean_scores, corrupt_scores])
+    if len(np.unique(y_true)) < 2:
+        return None
+    try:
+        return (float(roc_auc_score(y_true, y_score)),
+                float(average_precision_score(y_true, y_score)),
+                calc_fpr95(y_true, y_score))
+    except Exception:
+        return None
+
 def _get_present(all_phi, corruptions=None, severities=None):
     corruptions = corruptions or cfg.CORRUPTIONS
     severities  = severities  or cfg.SEVERITIES
@@ -389,7 +422,7 @@ def _subsample(arr: np.ndarray, n: int = MAX_FIT_SAMPLES) -> np.ndarray:
     MAX_FIT_SAMPLES=3000 to bound fit time; that compute cap has been removed so
     every fitting path — Mahalanobis, kNN, GMM, OCSVM, flow, AE, MDD reference —
     sees all available data.)"""
-    if "--fast" in sys.argv:
+    if FAST_MODE:
         cap = min(n if n is not None else len(arr), 500)
         if len(arr) <= cap:
             return arr
@@ -412,7 +445,7 @@ OCSVM_FIT_SAMPLES = 20000
 def _cap_subset(arr: np.ndarray, n: int = GMM_FIT_SAMPLES, seed: int = 42) -> np.ndarray:
     """Deterministic HARD cap to `n` rows. Unlike `_subsample` (no-op outside
     --fast), this always caps — for fits whose cost scales badly with n."""
-    if "--fast" in sys.argv:
+    if FAST_MODE:
         n = min(n if n is not None else len(arr), 500)
     if n is None or len(arr) <= n:
         return arr

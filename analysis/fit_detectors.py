@@ -17,7 +17,7 @@ from vmem_benchmark import benchmark_config as cfg
 from analysis.representation_ablation import load_all_features, extract_representation
 from analysis.vmem_utils import (
     MAX_FIT_SAMPLES, TRAIN_RATIO, split_boundary, load_phi_seq_lens, _subsample,
-    _cap_subset, GMM_FIT_SAMPLES, OCSVM_FIT_SAMPLES,
+    _cap_subset, GMM_FIT_SAMPLES, OCSVM_FIT_SAMPLES, FAST_MODE,
 )
 from analysis.gpu_fit import ledoit_wolf_precision, GpuPCA
 from analysis.vmem_models import RealNVP, train_flow_model
@@ -122,7 +122,7 @@ def main():
         "n_eval_held_out": int(len(X_clean) - cut),
         "n_features": n_features,
         "device": device,
-        "fast_mode": "--fast" in sys.argv,
+        "fast_mode": FAST_MODE,
         "detectors": {},
     }
 

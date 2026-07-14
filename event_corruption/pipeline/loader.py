@@ -22,7 +22,6 @@ import numpy as np
 from pathlib import Path
 
 H5_SUBPATH  = "event_representations_v2/stacked_histogram_dt=50_nbins=10"
-LABELS_DIR  = "labels_v2"
 EXPECTED_CHANNELS = 20   # 2 * nbins — fixed regardless of resolution
 # Gen1: (20, 240, 304). Gen4 (downsample_by_factor_2, 720x1280 -> half res): (20, 360, 640).
 H5_FILENAME_CANDIDATES = ("event_representations_ds2_nearest.h5", "event_representations.h5")
@@ -84,57 +83,3 @@ def load_histogram(seq_dir: Path) -> tuple[np.ndarray, np.ndarray]:
         f"Frame count mismatch: histogram={len(histogram)}, timestamps={len(timestamps)}"
 
     return histogram, timestamps
-
-
-def load_labels(seq_dir: Path) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Load bounding box labels and the objframe→label index.
-
-    Returns
-    -------
-    labels    : structured array, dtype [('t','u8'),('x','f4'),('y','f4'),
-                ('w','f4'),('h','f4'),('class_id','u1'),
-                ('class_confidence','f4'),('track_id','u4')]
-    label_idx : (M,) int64 — objframe_idx_2_label_idx
-    """
-    seq_dir  = Path(seq_dir)
-    npz_path = seq_dir / LABELS_DIR / "labels.npz"
-
-    if not npz_path.exists():
-        raise FileNotFoundError(f"Labels not found: {npz_path}")
-
-    data = np.load(npz_path, allow_pickle=False)
-    required = {"labels", "objframe_idx_2_label_idx"}
-    missing  = required - set(data.keys())
-    if missing:
-        raise KeyError(f"labels.npz missing keys: {missing}")
-
-    return data["labels"], data["objframe_idx_2_label_idx"]
-
-
-def load_repr_index(seq_dir: Path) -> np.ndarray:
-    """
-    Load the objframe_idx → repr_idx mapping.
-
-    Returns
-    -------
-    repr_idx : (M,) int64
-    """
-    path = Path(seq_dir) / H5_SUBPATH / "objframe_idx_2_repr_idx.npy"
-    if not path.exists():
-        raise FileNotFoundError(f"repr index not found: {path}")
-    return np.load(path)
-
-
-def load_label_timestamps(seq_dir: Path) -> np.ndarray:
-    """
-    Load per-objframe label timestamps (µs).
-
-    Returns
-    -------
-    ts : (M,) int64
-    """
-    path = Path(seq_dir) / LABELS_DIR / "timestamps_us.npy"
-    if not path.exists():
-        raise FileNotFoundError(f"Label timestamps not found: {path}")
-    return np.load(path)

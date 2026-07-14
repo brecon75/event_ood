@@ -2,7 +2,6 @@ import torch
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from sklearn.metrics import roc_auc_score, average_precision_score, roc_curve
 from tqdm import tqdm
 from scipy.special import logsumexp
 
@@ -11,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vmem_benchmark import benchmark_config as cfg
 from analysis.vmem_utils import (
     split_train_eval, load_phi_seq_lens, chunked_apply, knn_score,
-    device_for, split_boundary, TRAIN_RATIO, query_chunk_rows,
+    device_for, split_boundary, TRAIN_RATIO, query_chunk_rows, calc_fpr95, auroc_aupr_fpr95,
 )
 from analysis.gpu_fit import ledoit_wolf_precision
 import functools
@@ -71,12 +70,6 @@ def _energy(logits):
     lg = logits.numpy() if hasattr(logits, "numpy") else np.asarray(logits)
     return -logsumexp(lg, axis=1)
 
-
-def calc_fpr95(y_true, y_score):
-    if len(np.unique(y_true)) < 2: return float("nan")
-    fpr, tpr, _ = roc_curve(y_true, y_score)
-    idx = int(np.argmax(tpr >= 0.95))
-    return fpr[idx]
 
 class DetectorMSP:
     def __init__(self): pass
@@ -714,18 +707,10 @@ def evaluate_representation(rep_name, rep_dir, limit=None):
         for name, det in detectors.items():
             t_scores = det.score(t_feats, t_logits)
             
-            y_true = np.concatenate([np.zeros(len(clean_scores[name])), np.ones(len(t_scores))])
-            y_score = np.concatenate([clean_scores[name], t_scores])
-            
-            # Guard against degenerate case (only 1 class present)
-            if len(np.unique(y_true)) < 2:
+            metrics = auroc_aupr_fpr95(clean_scores[name], t_scores)
+            if metrics is None:
                 continue
-            try:
-                auroc = roc_auc_score(y_true, y_score)
-                aupr = average_precision_score(y_true, y_score)
-                fpr95 = calc_fpr95(y_true, y_score)
-            except Exception:
-                continue
+            auroc, aupr, fpr95 = metrics
             
             results.append({
                 "model": "ResNet18",

@@ -76,7 +76,7 @@ echo "Stage 15: Building final paper LaTeX tables..."
 $PYTHON reporting/build_paper_tables.py
 
 echo "Stage 16: Building final paper figures..."
-$PYTHON reporting/build_paper_figures.py
+$PYTHON analysis/plot_corruption_graphs.py
 
 echo "======================================================================="
 echo "   FULL PIPELINE EXECUTION SUCCESSFUL!"

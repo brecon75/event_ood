@@ -212,6 +212,84 @@ def _fig_representation(sev=5):                       # 26
     plt.close(fig); print("wrote", "26_representation_ablation.png")
 
 
+def _fig_repr_summary(sev=None):                      # 31
+    """Mean AUROC per representation, averaged over all corruptions (and all
+    severities unless `sev` is given) --- the headline companion to the
+    per-corruption breakdown in _fig_representation (26)."""
+    f = RES_DIR / "representation_metrics.csv"
+    if not f.exists(): return
+    df = pd.read_csv(f)
+    if sev is not None: df = df[df.severity == sev]
+    order = ["full_membrane", "membrane_mean", "membrane_var", "membrane_kurtosis",
+             "spike", "spike_entropy", "ANN", "logits"]
+    disp = {"full_membrane": r"full $\varphi$", "membrane_mean": r"$\mu$",
+            "membrane_var": r"$\sigma^2$", "membrane_kurtosis": r"$\kappa$",
+            "spike": "spike rate", "spike_entropy": "spike entropy",
+            "ANN": "ANN feat.", "logits": "logits"}
+    m = df.groupby("representation").auroc.mean()
+    m = m.reindex([o for o in order if o in m.index]).dropna().sort_values(ascending=False)
+    fig, ax = plt.subplots(figsize=(8.2, 4.4)); x = np.arange(len(m))
+    ax.bar(x, m.values, color=[POS_BAR if v >= 0.5 else NEG_BAR for v in m.values], edgecolor="white")
+    ax.axhline(0.5, ls="--", lw=1, color="grey")
+    for i, v in enumerate(m.values): ax.text(i, v + 0.004, f"{v:.3f}", ha="center", va="bottom", fontsize=12)
+    ax.set_xticks(x); ax.set_xticklabels([disp.get(r, r) for r in m.index], rotation=20, fontsize=12)
+    ax.set_ylabel("mean AUROC"); ax.set_ylim(0.30, max(0.65, m.values.max() + 0.05))
+    ax.set_title("Representation ablation: mean AUROC over all corruptions/severities", fontsize=13)
+    _save(fig, "31_repr_mean_summary.png")
+
+
+def _fig_map_degradation():                           # 28
+    """Detector mAP under each corruption vs. the clean baseline (the motivation
+    experiment). Ported from analysis/check_map_degradation.py so this is the
+    single figure generator; that script keeps only the CSV/verdict-table logic."""
+    f = RES_DIR / "neftci_map_degradation.csv"
+    if not f.exists(): return
+    df = pd.read_csv(f).drop_duplicates(subset=["corruption", "severity"], keep="last")
+    clean = df[df.corruption.isin(["clean", "none"])]
+    if clean.empty: return
+    clean_ap = float(clean.AP.iloc[0])
+    rows = df[~df.corruption.isin(["clean", "none"])]
+    present = [c for c in _CORR_ORDER if c in set(rows.corruption)]
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.axhline(clean_ap, ls="--", c="black", lw=1.2, label=f"clean ({clean_ap:.3f})")
+    for c in present:
+        d = rows[rows.corruption == c].sort_values("severity")
+        ax.plot(d.severity, d.AP, "o-", color=CORR_COLOR.get(c, PASTEL[0]), lw=2, label=c.replace("_", " "))
+    ax.set_xticks(sorted(rows.severity.unique())); ax.set_ylim(bottom=0)
+    ax.set_xlabel("severity"); ax.set_ylabel("detector mAP (COCO AP@[.5:.95])")
+    ax.set_title("Detector mAP under corruption (pretrained, no retraining)")
+    ax.legend(fontsize=10, ncol=2); ax.grid(alpha=.25)
+    _save(fig, "28_map_degradation.png")
+
+
+def _fig_map_drop_vs_detectability():                 # companion to 28, motivation cross-plot
+    """mAP-drop vs MDD detectability per corruption at the top severity --- not
+    currently referenced by the paper, kept for the motivation-section narrative."""
+    mf, af = RES_DIR / "neftci_map_degradation.csv", RES_DIR / "final_results.csv"
+    if not (mf.exists() and af.exists()): return
+    df = pd.read_csv(mf).drop_duplicates(subset=["corruption", "severity"], keep="last")
+    clean = df[df.corruption.isin(["clean", "none"])]
+    if clean.empty: return
+    clean_ap = float(clean.AP.iloc[0])
+    rows = df[~df.corruption.isin(["clean", "none"])].copy()
+    rows["mAP_drop"] = clean_ap - rows.AP
+    auroc = pd.read_csv(af)
+    top = int(rows.severity.max())
+    a = auroc[auroc.severity == top].set_index("corruption")["improved_seq"]
+    m = rows[rows.severity == top].set_index("corruption")
+    present = [c for c in _CORR_ORDER if c in m.index and c in a.index]
+    if not present: return
+    fig, ax = plt.subplots(figsize=(7, 5.5))
+    for c in present:
+        ax.scatter(m.loc[c, "mAP_drop"], a[c], s=90, color=CORR_COLOR.get(c, PASTEL[0]), zorder=3)
+        ax.annotate(c.replace("_", " "), (m.loc[c, "mAP_drop"], a[c]), fontsize=9,
+                    xytext=(5, 4), textcoords="offset points")
+    ax.axhline(0.5, ls="--", c="gray", lw=1)
+    ax.set_xlabel(f"mAP drop vs clean (L{top})"); ax.set_ylabel(f"MDD OOD AUROC, per-seq (L{top})")
+    ax.set_title("Does mAP damage align with detectability?"); ax.grid(alpha=.25)
+    _save(fig, "29_map_drop_vs_detectability.png")
+
+
 def _fig_detectors():                                 # 27
     f = RES_DIR / "ood_metrics.csv"
     if not f.exists(): return
@@ -554,7 +632,8 @@ def _csv_figures(df, CORRS, COLORS):
         except Exception as e: print("23 fail:", e)
 
     # -- per-detector / ablation summary figures (their own CSVs) --
-    for _fn in (_fig_detectability, _fig_sensitivity, _fig_representation, _fig_detectors):
+    for _fn in (_fig_detectability, _fig_sensitivity, _fig_representation, _fig_repr_summary,
+                _fig_detectors, _fig_map_degradation, _fig_map_drop_vs_detectability):
         try: _fn()
         except Exception as e: print(f"{_fn.__name__} fail:", e)
 

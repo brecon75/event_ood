@@ -43,7 +43,7 @@ python analysis/analyse.py
 
 # Generate paper tables and figures
 python reporting/build_paper_tables.py
-python reporting/build_paper_figures.py
+python analysis/plot_corruption_graphs.py
 ```
 
 ### Installation
@@ -76,12 +76,13 @@ Stage 12: cross_corruption.py              → Zero-shot generalization
 Stage 13: free_rider_ablation.py           → Trained vs Random SNN vs Raw Input
 Stage 14: analyse.py                       → All analysis, heatmaps, PCA, conformal
 Stage 15: reporting/build_paper_tables.py  → LaTeX tables
-Stage 16: reporting/build_paper_figures.py → Publication-ready figures
+Stage 16: analysis/plot_corruption_graphs.py → Publication-ready figures (the single figure
+          generator for the paper; cache-driven, reads banked CSVs + phi, no re-extraction)
 ```
 
-**MDD (Stage 8)** is the single unsupervised detector from `Docs/novel.md`: radius +
+**MDD (Stage 8)** is the single unsupervised detector described in `Docs/mdd_improvements.md`: radius' +
 direction-conditioned RCF + deep-layer + (when `phi_spatial` exists) spatial branches, fused by a
-calibrated max. `analysis/mdd.py` holds the class; `evaluate_mdd.py` writes `results/mdd_metrics.csv`
+studentized combiner. `analysis/mdd.py` holds the class; `evaluate_mdd.py` writes `results/mdd_metrics.csv`
 (per-frame) and `results/mdd_metrics_aggregated.csv` (per-sequence).
 
 ### Key Components

@@ -170,8 +170,8 @@ sensor failure mechanism (Figure~\ref{fig:schematic}).
     on the reset nonlinearity (Section~\ref{sec:theory}).
     \item \textbf{The Manifold-Decomposition Detector (MDD).} MDD scores several complementary,
     two-sided directions in feature space and combines them with a calibrated OR rule
-    (Section~\ref{sec:mdd}), reaching $\geq 0.85$ AUROC on four of the six corruptions at the
-    highest severity using a bounded $64$-frame window (Section~\ref{sec:window}).
+    (Section~\ref{sec:mdd}); results and the residual analysis are in
+    Section~\ref{sec:results}.
 \end{itemize}
 
 % =====================================================================
@@ -296,9 +296,8 @@ our histogram operation are detailed in Appendix~\ref{app:mechanisms}
      \textcolor{blue!70}{$\bullet$}~OFF event \quad
      \textcolor{black!35}{$\bullet$}~time-displaced event \quad
      \fbox{\scriptsize dashed}~dead region}
-  \caption{\textbf{The six Gen1-C corruptions.} For each: a normal event frame (left) and the
-  corrupted frame the modelled hardware fault produces (right). Mechanisms are described in
-  Section~\ref{sec:mechanisms}; the induced membrane signatures in Section~\ref{sec:theory}.}
+  \caption{The six Gen1-C corruptions: normal (left) vs.\ corrupted (right) event frame.
+  Mechanisms in Section~\ref{sec:mechanisms}; membrane signatures in Section~\ref{sec:theory}.}
   \label{fig:schematic}
 \end{figure}
 
@@ -469,9 +468,7 @@ shows the full pipeline.
     \draw[->] (win) -- (out);
     \node[above=1.5mm of fuse, font=\scriptsize\itshape, text=black!60] {branch scales calibrated on held-out clean};
   \end{tikzpicture}}
-  \caption{\textbf{The MDD pipeline} (described in Section~\ref{sec:mdd}): four two-sided
-  branches over the PCA-denoised descriptor $z$, fused by a studentized $\max-\alpha\,\mathrm{median}$
-  and optionally windowed.}
+  \caption{The MDD pipeline (Section~\ref{sec:mdd}).}
   \label{fig:mdd-flow}
 \end{figure}
 
@@ -516,9 +513,7 @@ retraining, corrupting the event histogram before it is fed into the model.
   \includegraphics[width=\linewidth]{28_map_degradation.png}
   \end{minipage}
   \caption{Detection mAP (COCO AP@[.5:.95]) of the pretrained hybrid detector under each Gen1-C
-  corruption at severities 1--5 (no retraining; clean baseline $0.358$), and the same data plotted
-  (right). \texttt{event\_flood} degrades fastest; \texttt{polarity\_flip} stays flat despite being
-  undetectable by the membrane.}
+  corruption at severities 1--5 (no retraining; clean baseline $0.358$), tabulated and plotted.}
   \label{tab:map-degradation}
 \end{table}
 \texttt{event\_flood} is the most destructive (mAP $0.341\to0.003$); \texttt{polarity\_flip} is
@@ -567,9 +562,7 @@ theory-predicted (Section~\ref{sec:limitations}).
   \end{tabular}}
   \end{minipage}
   \caption{Fused MDD AUROC (shipped improved default: \texttt{radius}$'$ + studentized fusion).
-  \textbf{(a)}~per-frame: contractions and the invariant \texttt{polarity\_flip} sit near chance.
-  \textbf{(b)}~per-$W{=}64$-window: four corruptions reach ${\geq}0.85$ without full-recording
-  pooling; \texttt{spatial\_dropout} and \texttt{polarity\_flip} remain the residuals.}
+  \textbf{(a)}~per-frame. \textbf{(b)}~per-$W{=}64$-window.}
   \label{tab:mdd}\label{tab:mdd-frame}\label{tab:mdd-w64}
 \end{table}
 
@@ -597,9 +590,7 @@ derivation and the reference-reduction ablation are in Appendix~\ref{app:compute
 \begin{table}[t]
   \centering\small
   \caption{Measured (not simulated) inference latency of the embedded MDD variant on real
-  hardware, against the $50$\,ms/frame deadline. Phone-class devices measured via Qualcomm AI
-  Hub~\citep{qualcommaihub}; the STM32 board via ST Edge AI Developer Cloud's~\citep{stedgeai}
-  hardware farm.}
+  hardware, against the $50$\,ms/frame deadline (methodology in Appendix~\ref{app:compute}).}
   \label{tab:mdd-hw}
   \begin{tabular}{llcc}
     \toprule
@@ -645,17 +636,16 @@ and methodology in Appendix~\ref{app:repr} (Table~\ref{tab:repr-ablation}).
 \begin{figure}[t]
   \centering
   \includegraphics[width=0.62\linewidth]{31_repr_mean_summary.png}
-  \caption{\textbf{Representation ablation}, mean AUROC over all corruptions and severities.
-  Full membrane $\varphi$ leads; ANN features are the weakest read-out from the same forward
-  pass. Per-corruption breakdown in Appendix~\ref{app:repr}.}
+  \caption{Representation ablation, mean AUROC over all corruptions and severities.
+  Per-corruption breakdown in Appendix~\ref{app:repr}.}
   \label{fig:repr-summary}
 \end{figure}
 
 \subsection{Branch decomposition and fusion ablation}
 \label{sec:branches}
-Figure~\ref{fig:branches}a shows each branch is corruption-specialized (radius owns dilations, L4
-owns timing, RCF/spatial own contractions); the plain calibrated \texttt{max} sits \emph{below}
-the best single branch on both residuals, motivating the studentized fusion
+Table~\ref{tab:mdd-branch} (Appendix~\ref{app:mdd-branches}) shows each branch is corruption-specialized
+(radius owns dilations, L4 owns timing, RCF/spatial own contractions); the plain calibrated \texttt{max}
+sits \emph{below} the best single branch on both residuals, motivating the studentized fusion
 (Appendix~\ref{app:mdd-improve}). This follows the classical outlier-ensemble bias--variance
 argument~\citep{aggarwal2015ensembles}: when an anomaly is flagged by only a \emph{few} base
 detectors (here, one branch per corruption; leave-one-out, Table~\ref{tab:mdd-loo}), averaging or
@@ -676,8 +666,9 @@ Table~\ref{tab:mdd-w64} (main text) is the headline: $W{=}64$ (${\approx}0.64$\,
 recovers most of the signal \emph{without} any whole-recording assumption; full-sequence aggregation
 (${\sim}730$ frames, once per recording) is an optimistic upper bound (Appendix~\ref{app:window},
 Table~\ref{tab:window}). The $W$ sweep at severity~5 shows when the signal becomes reliable:
-\texttt{hot\_pixel} is at $1.00$ by $W{=}16$ (${\approx}0.16$\,s), all four detectable corruptions
-exceed $0.85$ by $W{=}64$, and \texttt{event\_flood} reaches $0.98$ by $W{=}128$.
+\texttt{hot\_pixel} is at $1.00$ by $W{=}16$ (${\approx}0.16$\,s), and \texttt{event\_flood}
+--- the slowest of the four detectable corruptions to converge (Table~\ref{tab:mdd-w64}) ---
+reaches $0.98$ by $W{=}128$.
 
 \paragraph{Windowing versus per-frame signal.} \texttt{event\_flood}'s rise ($0.55\!\to\!0.98$) comes
 from integrating a temporally-consistent bias, so we report the \emph{windowed} value.
@@ -686,15 +677,9 @@ a per-frame signal that is not there.
 
 \begin{figure}[t]
   \centering
-  \includegraphics[width=\linewidth]{40_branch_window.png}
-  \caption{MDD detection at L5. \textbf{(a)}~per-branch AUROC (corruption $\times$ branch, $W{=}64$):
-  each branch owns a different corruption and \texttt{fused} tracks the per-corruption best.
-  \textbf{(b)}~fused AUROC vs.\ aggregation window $W$: the four detectable corruptions rise with $W$
-  (\texttt{event\_flood} slowest, crossing $0.85$ near $W{=}128$) while the two residuals stay flat at
-  \emph{every} window. The $\alpha$ trade-off is in Appendix~\ref{app:mdd-improve}
-  (Figure~\ref{fig:alpha-tradeoff}a); the combiner benchmark is in Appendix~\ref{app:fusion}.}
-  \label{fig:branches}
-  \label{fig:detect}
+  \includegraphics[width=0.72\linewidth]{01_window_sweep_fused_L5.png}
+  \caption{Fused AUROC vs.\ aggregation window $W$ (L5). Per-branch specialization is in
+  Table~\ref{tab:mdd-branch} (Appendix~\ref{app:mdd-branches}).}
   \label{fig:window}
 \end{figure}
 
@@ -747,10 +732,9 @@ detector would reproduce at a fixed deployment threshold, where no such labels a
 
 \section{Conclusion}
 \label{sec:conclusion}
-Gen1-C, the leaky-integrator theory, and MDD together turn a signal that costs nothing extra to
-read into a detector whose successes and residuals are both predicted in advance rather than
-discovered post hoc. The one open problem, \texttt{spatial\_dropout}, points to spatial-dispersion
-features and adaptive neurons as the natural next directions.
+The one open problem, \texttt{spatial\_dropout}, points to spatial-dispersion features and adaptive
+neurons as the natural next directions -- a target the theory itself identifies, not one found by
+post-hoc search.
 
 % =====================================================================
 \bibliography{refs}
@@ -795,9 +779,8 @@ CIs on the headline numbers (Appendix~\ref{app:window}).
     \texttt{polarity\_flip}    & 0.548 & 0.936 & 0.589 & 0.933 \\
     \bottomrule
   \end{tabular}
-  \caption{Fused MDD at severity~5: AUPR and FPR@95\%, per-frame and per-$W{=}64$-window, computed
-  from the same fitted branches and studentized fusion as Table~\ref{tab:mdd} (whose S5 AUROC
-  column applies unchanged here).}
+  \caption{Fused MDD at severity~5: AUPR and FPR@95\%, per-frame and per-$W{=}64$-window (same
+  branches/fusion as Table~\ref{tab:mdd}).}
   \label{tab:mdd-aupr}
 \end{table}
 
@@ -1235,9 +1218,7 @@ hardware below.
 
 \begin{table}[t]
   \centering\small
-  \caption{Inference-time compute comparison. Every baseline adds non-trivial computation;
-  Vmem-$\varphi$ reads a byproduct of the existing forward pass and tests a compact
-  per-frame vector (Ex.~\ref{prop:spike}).}
+  \caption{Inference-time compute comparison across baselines.}
   \label{tab:hardware}
   \begin{tabularx}{\linewidth}{@{}>{\raggedright}X >{\raggedright}X >{\raggedright\arraybackslash}X@{}}
     \toprule
@@ -1282,11 +1263,8 @@ $\tau{=}40$) yields a fully ONNX-exportable graph at a cost of $0.006$ further m
 
 \begin{table}[t]
   \centering\small
-  \caption{Fused AUROC ($W{=}64$, L5) as the RCF reference set and search are shrunk for embedded
-  export. \textbf{Full}: all $204{,}096$ clean frames, hard top-$64$ search. \textbf{FPS-200}:
-  $200$ farthest-point-sampled reference frames, hard top-$64$ search (still requires
-  $\mathrm{TopK}$). \textbf{FPS-200, softmax}: same $200$ references, softmax-weighted average
-  ($\tau{=}40$) replacing $\mathrm{TopK}$ --- the variant actually exported and profiled below.}
+  \caption{Fused AUROC ($W{=}64$, L5) as the RCF reference set and search are shrunk for
+  embedded export (column definitions in the text above).}
   \label{tab:mdd-reduce}
   \resizebox{\linewidth}{!}{%
   \begin{tabular}{lcccc}
@@ -1310,8 +1288,7 @@ actual device latency on Qualcomm AI Hub~\citep{qualcommaihub} (phone-class NPU/
 Developer Cloud~\citep{stedgeai} (microcontroller board farm; Table~\ref{tab:mdd-hw}, main text).
 Phone devices clear the $50$\,ms/frame deadline by $1$--$2$ orders of magnitude; of the two bare
 Cortex-M7 MCUs, one clears it and one misses by $1.048\times$ despite the similar core -- board-level
-factors, not clock speed, decide real-time feasibility without a neural accelerator. Total accuracy
-cost of the embedded variant: $0.010$ mean AUROC ($0.802\!\to\!0.792$).
+factors, not clock speed, decide real-time feasibility without a neural accelerator.
 
 \paragraph{Memory and compute footprint.} Both boards' available internal RAM ($455$--$560$\,KB)
 covers the $30.06$\,KB the model needs by $15$--$18\times$ headroom; the $10.03$\,MB flash footprint
@@ -1341,49 +1318,11 @@ axis it perturbs.
     \bottomrule
   \end{tabularx}
 \end{table}
-Each corruption is grounded in a documented event-camera (DVS) non-ideality, and our histogram-level
-operation is the faithful tensor-domain analogue of that fault.
-\begin{itemize}
-  \item \textbf{\texttt{hot\_pixel} -- defective / stuck pixels, fixed-pattern noise.} Threshold
-        mismatch and leakage make individual pixels fire continuously at fixed coordinates with no
-        scene change: v2e explicitly models such \emph{hot pixels}~\citep{hu2021v2e}, a form of
-        \emph{background-activity} noise that grows in dim/high-gain
-        conditions~\citep{guo2023badenoising}. \emph{Our op:} add a constant count at a fixed set of
-        pixel locations across all frames and time bins: a constant DC offset, the event-camera
-        analogue of stuck CCD/CMOS pixels.
-  \item \textbf{\texttt{event\_flood} -- illumination transients, EMI, readout saturation.} LED/PWM
-        flicker or a strong-light transient drives a dense burst of spurious events; flickering
-        sources ``generate many events that provide little or no useful
-        information''~\citep{wang2022combfilter}, and when the local event rate exceeds the
-        readout bandwidth the bus saturates and events are dropped or
-        delayed~\citep{gehrig2024lowlatency}. \emph{Our op:} inject a localized count burst over a
-        short frame window, bounded in space and time.
-  \item \textbf{\texttt{temporal\_jitter} -- clock noise, timestamp error.} Transistor noise,
-        arbitration/queuing delay, and finite timestamp resolution misassign events to neighbouring
-        time bins; modern row-arbitrated readouts introduce \emph{systematic} timestamp
-        errors~\citep{gehrig2024lowlatency,gallego2022survey}. \emph{Our op:} roll the ON and OFF
-        time-bin channels by independent integer shifts (zero-filled), preserving the marginal
-        counts up to the edge bins while scrambling the \emph{order} (and hence the temporal
-        autocorrelation) of events.
-  \item \textbf{\texttt{event\_rate\_shift} -- contrast-threshold / bias drift, domain gap.}
-        Per-pixel contrast thresholds and bias currents set the event rate, and circuit bias plus
-        manufacturing imperfection make the effective threshold differ across pixels and
-        drift~\citep{wang2019threshold,graca2023dvspixel}; this, or a low- vs.\ high-texture
-        (slow- vs.\ fast-motion) domain gap, scales the global rate. \emph{Our op:} multiply all
-        counts by a seeded under- or over-rate factor.
-  \item \textbf{\texttt{polarity\_flip} -- ON/OFF threshold asymmetry.} The ON and OFF thresholds of
-        a pixel are not equal: ``warm''/``cool'' pixels trigger positive vs.\ negative events
-        more or less often than expected, an unbalanced-threshold non-ideality~\citep{wang2019threshold,hu2021v2e},
-        so the brightness-change sign is misreported, and under fast global illumination swings
-        whole frames can invert. \emph{Our op:} swap the ON/OFF channel blocks on a random fraction
-        of frames.
-  \item \textbf{\texttt{spatial\_dropout} -- dead-pixel clusters, occlusion.} Permanently damaged
-        (dead) pixels, dust/lens contamination, condensation, or partial physical occlusion zero the
-        event support over contiguous areas~\citep{gallego2022survey}; the related stochastic
-        event-removal primitive is used as a \emph{training} augmentation by
-        EventDrop~\citep{gu2021eventdrop}. \emph{Our op:} zero one or more rectangular regions across
-        all frames and channels.
-\end{itemize}
+Each corruption is grounded in a documented event-camera (DVS) non-ideality; the mapping from fault
+to our histogram-level operation is exactly the ``Our op'' pairing described alongside each corruption
+in Section~\ref{sec:corr-algos}. One related-work note not covered there: the stochastic event-removal
+primitive behind \texttt{spatial\_dropout} is also used, in a different role, as a \emph{training}
+augmentation by EventDrop~\citep{gu2021eventdrop}.
 
 \section{Severity Schedules}
 \label{app:severity-schedules}
@@ -1479,14 +1418,13 @@ The eight representations are:
 \paragraph{Results.}
 The pattern is shown in Table~\ref{tab:repr-ablation} (per-corruption breakdown) and
 Figure~\ref{fig:repr-summary} (main text, mean over all corruptions), and confirms the
-theoretical predictions.
+theoretical predictions: \texttt{cls\_head} wins on four of six individual corruptions, but
+\texttt{full\_membrane} ($\varphi$) leads on the overall mean.
 
 \begin{table}[t]
   \centering\small
-  \caption{\textbf{Representation ablation}, per-corruption Mahalanobis AUROC averaged over all
-  five severities; \textbf{bold} marks the best representation per corruption.
-  \texttt{full\_membrane} is $\varphi$; \texttt{cls\_head} wins on four of six individual
-  corruptions, but $\varphi$ leads on the overall mean (Figure~\ref{fig:repr-summary}, main text).}
+  \caption{Representation ablation, per-corruption Mahalanobis AUROC averaged over all five
+  severities; \textbf{bold} marks the best representation per corruption.}
   \label{tab:repr-ablation}
   \resizebox{\linewidth}{!}{%
   \begin{tabular}{lcccccccc}
@@ -1523,18 +1461,16 @@ and \texttt{spatial\_dropout} under one-sided scoring: the contraction inversion
 Section~\ref{sec:theory} taxonomy, which MDD's two-sided branches address.
 
 Across the seven classical detectors on static $\varphi$ (mean over $6{\times}5$,
-Figure~\ref{fig:detcmp}), PCA-Mahalanobis leads ($0.567$), followed by
-Mahalanobis ($0.563$), GMM ($0.551$), MLP-AE ($0.545$), RealNVP ($0.542$); OCSVM ($0.484$) and
-$k$NN ($0.473$) fall \emph{below} chance because a one-sided density score inverts on the
-contraction corruptions. The means cluster near $0.5$ precisely because no \emph{single}-sided
-detector can handle both dilations and contractions: the motivation for MDD.
+Figure~\ref{fig:detcmp}), PCA-Mahalanobis and Mahalanobis lead; $k$NN and OCSVM fall
+\emph{below} chance because a one-sided density score inverts on the contraction corruptions. The
+means cluster near $0.5$ precisely because no \emph{single}-sided detector can handle both
+dilations and contractions: the motivation for MDD.
 
 \begin{figure}[t]
   \centering
   \includegraphics[width=0.72\linewidth]{27_detector_comparison.png}
-  \caption{\textbf{Seven classical OOD detectors on static $\varphi$}, mean AUROC over all
-  corruptions/severities. PCA-Mahalanobis/Mahalanobis lead; $k$NN/OCSVM invert below chance on the
-  contractions: one-sided detectors cannot face both ways, motivating MDD.}
+  \caption{Seven classical OOD detectors on static $\varphi$, mean AUROC over all
+  corruptions/severities.}
   \label{fig:detcmp}
 \end{figure}
 
@@ -1648,9 +1584,8 @@ Figure~\ref{fig:sensitivity}).
 \begin{figure}[t]
   \centering
   \includegraphics[width=0.96\linewidth]{24_sensitivity_L5.png}
-  \caption{\textbf{MDD hyperparameter sensitivity} (fused AUROC, $W{=}64$, L5): \texttt{k\_pca},
-  \texttt{k\_nn} (flat, log $x$), a real random-subsample cap on the RCF reference (third panel),
-  and farthest-point sampling replacing it (fourth panel). Discussion above.}
+  \caption{MDD hyperparameter sensitivity (fused AUROC, $W{=}64$, L5): \texttt{k\_pca},
+  \texttt{k\_nn}, a random-subsample reference cap, and farthest-point sampling replacing it.}
   \label{fig:sensitivity}
 \end{figure}
 
@@ -1693,10 +1628,15 @@ Figure~\ref{fig:improve}b).
 
 \begin{figure}[t]
   \centering
-  \includegraphics[width=\linewidth]{41_alpha_improve.png}
-  \caption{Studentized fusion ($W{=}64$, L5). \textbf{(a)}~$\alpha$ trade-off: increasing $\alpha$
-  lifts \texttt{spatial\_dropout} while lowering \texttt{polarity\_flip} (default $\alpha{=}0.5$).
-  \textbf{(b)}~improved $-$ baseline AUROC per corruption $\times$ severity.}
+  \setlength{\tabcolsep}{0pt}
+  \begin{tabular}{@{}cc@{}}
+    \includegraphics[width=0.49\linewidth]{16_alpha_tradeoff.png} &
+    \includegraphics[width=0.49\linewidth]{22_improvement_by_severity.png} \\
+    {\scriptsize (a) $\alpha$ trade-off} &
+    {\scriptsize (b) improved $-$ baseline AUROC} \\
+  \end{tabular}
+  \caption{Studentized fusion ($W{=}64$, L5). \textbf{(a)}~$\alpha$ trade-off (default
+  $\alpha{=}0.5$). \textbf{(b)}~improved $-$ baseline AUROC per corruption $\times$ severity.}
   \label{fig:alpha-tradeoff}
   \label{fig:improve}
 \end{figure}
@@ -1714,52 +1654,37 @@ The full exp1--exp10 trail (including dead ends) is in the released repository.
 The full per-(corruption, severity, branch, window) sweep spans $17$ windows. The headline behaviour
 is \texttt{event\_flood}'s
 per-frame $\to$ $W{=}64$ $\to$ full-recording climb ($0.55\to0.89\to1.00$) against the two residuals
-that stay flat at every window (Table~\ref{tab:window}, Figure~\ref{fig:detect}b in the main text).
+that stay flat at every window (Table~\ref{tab:window}, Figure~\ref{fig:window} in the main text).
 
 \begin{table}[t]
   \centering\small
-  \caption{Fused MDD AUROC vs.\ aggregation window $W$ (frames) at severity~5, shipped
-  studentized fusion ($\max-0.5\,\mathrm{median}$); $W{=}64$ column matches Table~\ref{tab:mdd-w64}.
-  $W=1$ is per-frame, ``full'' is whole-recording; the $W{=}64$/full columns carry $95\%$
-  cluster-bootstrap CIs (resampling recordings, $2000$ resamples). A bounded window ($W=32$--$64$)
-  already solves the four detectable corruptions; \texttt{spatial\_dropout} and
-  \texttt{polarity\_flip} stay flat (and their CIs straddle or barely exceed $0.5$) at \emph{every}
-  window.}
+  \caption{Fused MDD AUROC vs.\ aggregation window $W$ (frames) at severity~5. $W=1$ is
+  per-frame, ``full'' is whole-recording; the $W{=}64$ point estimate is not repeated here
+  since it already appears in Table~\ref{tab:mdd-w64}(b) -- only its CI is new information.}
   \label{tab:window}
   \resizebox{\linewidth}{!}{%
   \begin{tabular}{lcccccc}
     \toprule
     Corruption & $W{=}1$ & $W{=}32$ & $W{=}64$ [95\% CI] & $W{=}128$ & full [95\% CI] \\
     \midrule
-    \texttt{hot\_pixel}        & 1.000 & 1.000 & $1.000$ $[1.000,1.000]$ & 1.000 & $1.000$ $[1.000,1.000]$ \\
-    \texttt{event\_rate\_shift}& 0.855 & 0.885 & $0.896$ $[0.858,0.927]$ & 0.914 & $0.955$ $[0.914,0.989]$ \\
-    \texttt{event\_flood}      & 0.551 & 0.778 & $0.889$ $[0.875,0.904]$ & 0.976 & $1.000$ $[1.000,1.000]$ \\
-    \texttt{temporal\_jitter}  & 0.850 & 0.859 & $0.869$ $[0.836,0.898]$ & 0.882 & $0.952$ $[0.915,0.984]$ \\
-    \texttt{spatial\_dropout}  & 0.560 & 0.572 & $0.576$ $[0.522,0.629]$ & 0.584 & $0.620$ $[0.537,0.700]$ \\
-    \texttt{polarity\_flip}    & 0.540 & 0.573 & $0.579$ $[0.522,0.634]$ & 0.587 & $0.611$ $[0.528,0.690]$ \\
+    \texttt{hot\_pixel}        & 1.000 & 1.000 & $[1.000,1.000]$ & 1.000 & $1.000$ $[1.000,1.000]$ \\
+    \texttt{event\_rate\_shift}& 0.855 & 0.885 & $[0.858,0.927]$ & 0.914 & $0.955$ $[0.914,0.989]$ \\
+    \texttt{event\_flood}      & 0.551 & 0.778 & $[0.875,0.904]$ & 0.976 & $1.000$ $[1.000,1.000]$ \\
+    \texttt{temporal\_jitter}  & 0.850 & 0.859 & $[0.836,0.898]$ & 0.882 & $0.952$ $[0.915,0.984]$ \\
+    \texttt{spatial\_dropout}  & 0.560 & 0.572 & $[0.522,0.629]$ & 0.584 & $0.620$ $[0.537,0.700]$ \\
+    \texttt{polarity\_flip}    & 0.540 & 0.573 & $[0.522,0.634]$ & 0.587 & $0.611$ $[0.528,0.690]$ \\
     \bottomrule
   \end{tabular}}
 \end{table}
 
 \paragraph{Detection-delay vs.\ accuracy trade-off (\texttt{event\_flood}).} Table~\ref{tab:window}'s
-\texttt{event\_flood} row converts directly to a deployment latency at $\Delta t{=}50$\,ms/frame
-(Figure~\ref{fig:event-flood-latency}): AUROC crosses the $0.85$ operating threshold at $W{=}64$
-($3.2$\,s decision latency) and reaches $0.976$ by $W{=}128$ ($6.4$\,s); the full-recording ceiling
-($1.00$) requires the whole ${\sim}730$-frame ($36.5$\,s) recording and is an optimistic upper bound,
-not a deployable operating point. For a time-critical setting, $W{=}64$ is the practical
-knee of the curve: cutting the window further trades a steep AUROC loss ($0.89\to0.78$ at $W{=}32$)
-for a $2\times$ latency win, while widening it past $W{=}128$ buys little accuracy for a large
-further latency cost.
-
-\begin{figure}[t]
-  \centering
-  \includegraphics[width=0.62\linewidth]{45_event_flood_latency.png}
-  \caption{\texttt{event\_flood} (severity~5): fused MDD AUROC vs.\ detection latency (window size
-  $\times$ $50$\,ms/frame, log scale). Same data as the \texttt{event\_flood} row of
-  Table~\ref{tab:window}; $W{=}64$ ($3.2$\,s) is the knee where AUROC first exceeds the $0.85$
-  operating threshold.}
-  \label{fig:event-flood-latency}
-\end{figure}
+\texttt{event\_flood} row converts directly to a deployment latency at $\Delta t{=}50$\,ms/frame:
+AUROC crosses the $0.85$ operating threshold at $W{=}64$ ($3.2$\,s decision latency) and reaches
+$0.976$ by $W{=}128$ ($6.4$\,s); the full-recording ceiling ($1.00$) requires the whole
+${\sim}730$-frame ($36.5$\,s) recording and is an optimistic upper bound, not a deployable operating
+point. For a time-critical setting, $W{=}64$ is the practical knee of the curve: cutting the window
+further trades a steep AUROC loss ($0.89\to0.78$ at $W{=}32$) for a $2\times$ latency win, while
+widening it past $W{=}128$ buys little accuracy for a large further latency cost.
 
 \paragraph{Confidence intervals.} The $W{=}64$/full CIs in Table~\ref{tab:window} are a $95\%$
 \emph{cluster} bootstrap (recordings resampled with replacement, since frames within a recording are
@@ -1791,10 +1716,8 @@ on clean data alone.
 \begin{figure}[t]
   \centering
   \includegraphics[width=0.6\linewidth]{30_cross_corruption_L5.png}
-  \caption{Zero-shot cross-corruption transfer: a clean-vs-\texttt{hot\_pixel} logistic detector on
-  the fused $\varphi$, evaluated on each held-out corruption (val-only, disjoint from training).
-  Every held-out type sits at or below chance and \texttt{event\_rate\_shift} inverts to $0.16$:
-  the $\varphi$ signature is corruption-specific, not a generic OOD direction.}
+  \caption{Zero-shot cross-corruption transfer: a clean-vs-\texttt{hot\_pixel} detector
+  evaluated on each held-out corruption (val-only, disjoint from training).}
   \label{fig:crosscorr}
 \end{figure}
 \section{Additional Geometry Figures}
@@ -1826,10 +1749,8 @@ Figure~\ref{fig:geometry} (radial energy and Mahalanobis $d^2$) and Figure~\ref{
     {\scriptsize (b) mean-shift direction cosine} \\
   \end{tabular}
   \caption{Corruption-direction geometry (L5). \emph{(a)}~centroid drift in a shared clean-PCA;
-  \emph{(b)}~cosine of the mean-shift directions: the two dilations align
-  (\texttt{hot\_pixel}$\leftrightarrow$\texttt{event\_flood}, $0.75$) as do the two
-  contraction-side residuals (\texttt{polarity\_flip}$\leftrightarrow$\texttt{spatial\_dropout},
-  $0.73$), while the taxonomy classes are near-orthogonal across groups.}
+  \emph{(b)}~cosine of the mean-shift directions: each taxonomy class's members align with each
+  other and sit near-orthogonal to the other classes (values in Section~\ref{sec:geometry}).}
   \label{fig:pca-drift}
   \label{fig:similarity}
 \end{figure}

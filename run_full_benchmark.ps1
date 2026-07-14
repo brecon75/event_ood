@@ -68,7 +68,7 @@ Invoke-Stage 13 "Running Free Rider validity ablation..."                       
 Invoke-Stage 14 "Running analysis and main plotting script..."                       "analysis/analyse.py"
 
 Invoke-Stage 15 "Building final paper LaTeX tables..."                               "reporting/build_paper_tables.py"
-Invoke-Stage 16 "Building final paper figures..."                                    "reporting/build_paper_figures.py"
+Invoke-Stage 16 "Building final paper figures..."                                    "analysis/plot_corruption_graphs.py"
 
 Write-Host "======================================================================="
 Write-Host "   FULL PIPELINE EXECUTION SUCCESSFUL!" -ForegroundColor Green

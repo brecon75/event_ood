@@ -717,24 +717,27 @@ above worse, not better.
 (ii)~$\varphi$ is read from the membrane state including the reset that follows each spike, so the
 linear, sub-threshold theory in Section~\ref{sec:theory} is only an approximation; a version of $V$
 with spikes strictly excluded, and a reset-aware analysis, remain untested.
-(iii)~Our AUROC values are point estimates from a single data split; we report $95\%$ bootstrap
-confidence intervals (resampling recordings) for the headline numbers in Appendix~\ref{app:window}.
+(iii)~All AUROC values are point estimates from a single split ($95\%$ bootstrap CIs for the
+headline numbers are in Appendix~\ref{app:window}), computed at a fixed $64$-frame window
+(Table~\ref{tab:mdd-w64}); the full-recording upper bound (Table~\ref{tab:window}) is optimistic,
+not a per-frame rate. AUROC itself measures label-known separability, not the accuracy a fixed
+deployment threshold would achieve without labels.
 (iv)~We use a single dataset (Gen1) and a single pretrained host model; transfer to other datasets
 (DSEC, Gen4) or architectures is untested. The corruption severities are synthetic, monotone
 transforms chosen to resemble real sensor faults (Section~\ref{sec:corruptions},
 Appendix~\ref{app:mechanisms}), but they are \emph{not} calibrated against measured hardware faults;
 a realistic-noise simulator such as v2e~\citep{hu2021v2e}, or capturing faults directly from hardware,
 would validate this mapping. What we contribute here is the benchmark, protocol, and feature release.
-(v)~The headline numbers use a $64$-frame window (Table~\ref{tab:mdd-w64}); the full-recording upper
-bound (Table~\ref{tab:window}) should not be read as a per-frame detection rate. AUROC measures how
-separable clean and corrupted scores are once the ground-truth labels are known, not a value the
-detector would reproduce at a fixed deployment threshold, where no such labels are available.
 
 \section{Conclusion}
 \label{sec:conclusion}
-The one open problem, \texttt{spatial\_dropout}, points to spatial-dispersion features and adaptive
-neurons as the natural next directions -- a target the theory itself identifies, not one found by
-post-hoc search.
+Membrane potential statistics, already computed as a byproduct of the spiking network's forward
+pass, give an unsupervised OOD signal whose behavior is predicted by a closed-form theory of the
+leaky integrator: MDD reaches high AUROC on four of the six Gen1-C corruptions, and the two
+residuals are exactly the cases the theory flags as information-limited or invariant to the
+trained network, not failures of the detector. The one open problem, \texttt{spatial\_dropout},
+points to spatial-dispersion features and adaptive neurons as the natural next directions -- a
+target the theory itself identifies, not one found by post-hoc search.
 
 % =====================================================================
 \bibliography{refs}

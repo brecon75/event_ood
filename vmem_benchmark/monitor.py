@@ -26,21 +26,93 @@ every captured tensor to (T, 1, C, H, W) immediately after capture.
 """
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 from typing import Dict, List, Optional
 from spikingjelly.clock_driven.neuron import MultiStepParametricLIFNode
 
 
+# ---------------------------------------------------------------------------
+# Spatial-organization statistics (the compact block appended to phi_spatial)
+# ---------------------------------------------------------------------------
+# Rationale: spatial_var/spatial_pr are global averages over the whole frame,
+# so a spatially-confined deviation gets diluted by the majority of pixels
+# that didn't change — the same blind spot GAP has for the temporal mean.
+# These statistics instead encode two priors that natural sensor data obeys
+# everywhere and always:
+#   * a local-texture floor — real membrane maps carry fine spatial structure
+#     in every neighbourhood, in at least some channel; a neighbourhood that
+#     is smooth in ALL channels simultaneously violates it ("too flat");
+#   * motion non-stationarity — with an ego-moving event sensor, whatever
+#     smooth areas do occur drift across the pixel grid; structure locked to
+#     fixed pixel coordinates over a whole sequence violates it ("too
+#     persistent").
+# A violation of either prior is anomalous per se; nothing here is shaped to
+# any particular corruption and nothing corrupted is ever seen during fit.
+SPATIAL_SCALES = (0.25, 0.125)        # sliding-window sizes as fraction of map
+COH_QUANTS = (0.001, 0.005, 0.02)     # low quantiles of the coherence map
+COH_TAUS = (0.02, 0.05, 0.10)         # thresholds for flat-pixel fractions
+FLAT_TAU = 0.05                       # indicator threshold feeding persistence
+PERS_QUANTS = (0.995, 0.999)          # high quantiles of the persistence map
+PERS_THRESH = (0.9, 0.99)             # thresholds for persistent-pixel fractions
+SPATIAL_COMPACT_DIMS = (2 * len(SPATIAL_SCALES)              # cohflat (mu,var)
+                        + 2 * len(COH_QUANTS)                # cohq (mu,var)
+                        + 2 * len(COH_TAUS)                  # cohfrac (mu,var)
+                        + len(PERS_QUANTS) + len(PERS_THRESH))  # 20 per layer
+
+
+def _win_relstd(m: torch.Tensor, frac: float) -> torch.Tensor:
+    """Within-window spatial std of a (C, H, W) map, relative to each
+    channel's global spatial std. Window size scales with the map (frac of
+    H, W) so it's comparable across PLIF layers at different resolutions.
+    Returns (C, n_windows)."""
+    C, H, W = m.shape
+    kh = max(2, round(H * frac))
+    kw = max(2, round(W * frac))
+    sh = max(1, kh // 4)
+    sw = max(1, kw // 4)
+    E = F.avg_pool2d(m.unsqueeze(0), (kh, kw), (sh, sw))[0]
+    E2 = F.avg_pool2d((m * m).unsqueeze(0), (kh, kw), (sh, sw))[0]
+    std_w = (E2 - E * E).clamp(min=0).sqrt()
+    g = m.flatten(1).std(dim=1, unbiased=False).clamp(min=1e-8)
+    return (std_w / g[:, None, None]).flatten(1)
+
+
+def _coh_map(m: torch.Tensor) -> torch.Tensor:
+    """Per-pixel cross-channel texture: local 3x3 spatial std relative to the
+    channel's global std, MAX over channels. A pixel that is smooth in every
+    channel at once scores low — natural smooth spots usually keep texture in
+    at least one channel. (C, H, W) -> (H-2, W-2)."""
+    E = F.avg_pool2d(m.unsqueeze(0), 3, 1)[0]
+    E2 = F.avg_pool2d((m * m).unsqueeze(0), 3, 1)[0]
+    lstd = (E2 - E * E).clamp(min=0).sqrt()
+    g = m.flatten(1).std(dim=1, unbiased=False).clamp(min=1e-8)
+    return (lstd / g[:, None, None]).amax(dim=0)
+
+
 class VmemMonitor:
-    def __init__(self, model: nn.Module, selected: Optional[List[int]] = None):
+    def __init__(self, model: nn.Module, selected: Optional[List[int]] = None,
+                 valid_frac: Optional[tuple] = None):
         """
-        model    : the backbone or full model to monitor
-        selected : list of PLIF indices to hook (0-indexed). None hooks all.
+        model      : the backbone or full model to monitor
+        selected   : list of PLIF indices to hook (0-indexed). None hooks all.
+        valid_frac : (h_frac, w_frac) of each layer map that is real sensor
+                     data. The model's input padder pads right+bottom only, so
+                     the valid region is the TOP-LEFT crop; the pad band is
+                     constant by construction and would contaminate every
+                     spatial-organization statistic. None = full map. Set it
+                     (or call set_valid_frac) before the first frame; the
+                     fraction is resolution-free, so one value serves all
+                     layers.
         """
         self._v: Dict[int, List[torch.Tensor]] = {}
         self._spikes: Dict[int, List[torch.Tensor]] = {}
         self._hooks = []
         self._selected = selected
+        self.valid_frac = valid_frac
+        # per-sequence causal persistence state (see new_sequence())
+        self._pers_acc: Dict[int, torch.Tensor] = {}
+        self._pers_n = 0
 
         idx = 0
         for name, module in model.named_modules():
@@ -107,6 +179,20 @@ class VmemMonitor:
             self._v[k] = []
         for k in self._spikes:
             self._spikes[k] = []
+
+    def set_valid_frac(self, valid_frac: tuple):
+        """Set (h_frac, w_frac) of the map that is real sensor data (padding
+        excluded). Derived by the caller from the padder's input/output shapes
+        so nothing is hardcoded to one sensor resolution."""
+        self.valid_frac = valid_frac
+
+    def new_sequence(self):
+        """Reset the per-sequence persistence accumulators. MUST be called at
+        the start of every sequence — the persistence statistics are causal
+        running means over the sequence so far, and letting them leak across
+        sequences breaks the motion-non-stationarity prior they encode."""
+        self._pers_acc = {}
+        self._pers_n = 0
 
     # ------------------------------------------------------------------
     # Spike features extraction
@@ -204,35 +290,102 @@ class VmemMonitor:
         return torch.cat(parts, dim=-1)  # (B, 3 * sum(C_layers))
 
     # ------------------------------------------------------------------
-    # Spatial-dispersion phi (B, 2*sum_C) — survives what GAP discards
+    # Spatial-organization compact block (1, 20) per layer
+    # ------------------------------------------------------------------
+    def _compact_spatial_stats(self, mu_map: torch.Tensor, var_map: torch.Tensor,
+                               idx: int) -> torch.Tensor:
+        """The 20 spatial-organization statistics for one layer's (B, C, H, W)
+        temporal-mean and temporal-variance maps (B=1 per the repo-wide
+        contract; the persistence accumulator is per-sequence state and only
+        meaningful at B=1).
+
+        Per-layer layout (20 dims):
+          [cohflat_mu_w25, cohflat_mu_w12, cohflat_var_w25, cohflat_var_w12,
+           cohq_mu(3), cohq_var(3), cohfrac_mu(3), cohfrac_var(3),
+           persq(2), persfrac(2)]
+
+        cohflat : channel-mean windowed relative std, min over windows — the
+                  local-texture floor at two window scales, for both maps.
+        cohq    : low quantiles of the cross-channel coherence map.
+        cohfrac : fraction of pixels below each coherence threshold.
+        persq   : high quantiles of the causal per-pixel persistence map R
+                  (running mean of the flat indicator over the sequence so
+                  far) — how persistent the MOST persistent pixels are.
+        persfrac: fraction of pixels with R above each persistence threshold.
+        """
+        dev = mu_map.device
+        vh_f, vw_f = self.valid_frac if self.valid_frac is not None else (1.0, 1.0)
+        m_mu = mu_map[0]
+        m_var = var_map[0]
+        C, H, W = m_mu.shape
+        vh = max(4, round(H * vh_f))
+        vw = max(4, round(W * vw_f))
+        m_mu = m_mu[:, :vh, :vw]
+        m_var = m_var[:, :vh, :vw]
+
+        vals = []
+        for m in (m_mu, m_var):
+            for frac in SPATIAL_SCALES:
+                vals.append(_win_relstd(m, frac).mean(0).amin().reshape(1))
+        coh_mu = _coh_map(m_mu)
+        coh_var = _coh_map(m_var)
+        for cmap in (coh_mu, coh_var):
+            vals.append(torch.quantile(cmap.flatten(),
+                                       torch.tensor(COH_QUANTS, device=dev)))
+        for cmap in (coh_mu, coh_var):
+            fc = cmap.flatten()
+            vals.append(torch.stack([(fc < t).float().mean() for t in COH_TAUS]))
+        # causal persistence: flat means flat in BOTH maps at once
+        ind = ((coh_mu < FLAT_TAU) & (coh_var < FLAT_TAU)).float()
+        if idx not in self._pers_acc:
+            self._pers_acc[idx] = torch.zeros_like(ind)
+        self._pers_acc[idx] += ind
+        R = (self._pers_acc[idx] / max(1, self._pers_n + 1)).flatten()
+        vals.append(torch.quantile(R, torch.tensor(PERS_QUANTS, device=dev)))
+        vals.append(torch.stack([(R > t).float().mean() for t in PERS_THRESH]))
+        return torch.cat(vals).unsqueeze(0)  # (1, 20)
+
+    # ------------------------------------------------------------------
+    # Spatial-dispersion phi (B, 2*sum_C + 20*L) — survives what GAP discards
     # ------------------------------------------------------------------
     def collect_phi_spatial(self) -> torch.Tensor:
         """Spatial statistics of the membrane activity map that GAP destroys.
 
         collect_phi() Global-Average-Pools over space, discarding *where* each
-        channel fired and keeping only the average. Spatial corruptions
-        (spatial_dropout silences regions; event_flood inflates uniformly)
-        leave their primary signature in that spatial layout, so they are
+        channel fired and keeping only the average. Spatially-structured
+        deviations leave their primary signature in that layout, so they are
         nearly invisible to GAP'd phi. From the per-pixel temporal-mean map
         mu_pix (B,C,D) and temporal-variance (energy) map var_pix (B,C,D) we
-        keep two cheap per-channel summaries, computed from tensors collect_phi
-        already materialises (near-zero extra cost, same forward pass):
+        keep, per channel (near-zero extra cost, same forward pass):
 
           spatial_var : Var over space of mu_pix — how NON-UNIFORM mean
-                        activity is across the sensor. Rises when regions go
-                        silent (dropout), falls under uniform flooding. A
-                        two-sided signal that GAP averages to zero.
+                        activity is across the sensor. A two-sided signal
+                        that GAP averages to zero.
           spatial_pr  : participation ratio of the energy map var_pix over
                         space, (Σ)^2 / (D · Σ²) in (0,1]; 1 = energy spread
                         evenly across pixels, →0 = concentrated in a few.
                         Captures spatial sparsity / concentration.
 
+        plus the 20-dim-per-layer spatial-ORGANIZATION block (see
+        _compact_spatial_stats): both stats above are still global averages,
+        so a small region that deviates from the rest gets diluted by the
+        majority of unchanged pixels (the same blind spot GAP has). The
+        organization block instead scores each frame against two natural-data
+        priors — the local-texture floor and motion non-stationarity — that
+        are violated exactly by localized / pixel-locked structure, whatever
+        its cause. Requires new_sequence() at each sequence start; call
+        EITHER this method OR collect_phi_and_spatial() once per frame, not
+        both (each advances the persistence state).
+
         Returns
         -------
-        (B, 2 * sum_layers(C_l)) — per layer [spatial_var(C) | spatial_pr(C)],
-        concatenated across layers. With BATCH_SIZE=1 this is (1, 1408).
+        (B, 2 * sum_layers(C_l) + 20 * n_layers) — per layer
+        [spatial_var(C) | spatial_pr(C)] concatenated across layers, then the
+        per-layer 20-dim compact blocks. With BATCH_SIZE=1 and 4 hooked
+        layers this is (1, 1488).
         """
         parts = []
+        compact_parts = []
         for idx in sorted(self._v.keys()):
             v_list = self._v[idx]
             if not v_list:
@@ -254,11 +407,14 @@ class VmemMonitor:
             spatial_pr = (s1 ** 2) / (D * s2)               # (B, C) in (0, 1]
 
             parts.append(torch.cat([spatial_var, spatial_pr], dim=-1))  # (B, 2C)
+            compact_parts.append(self._compact_spatial_stats(
+                mu.view(B, C, H, W), var.view(B, C, H, W), idx))        # (1, 20)
 
         if not parts:
             return torch.empty((0,))
 
-        return torch.cat(parts, dim=-1)  # (B, 2 * sum(C_layers))
+        self._pers_n += 1
+        return torch.cat(parts + compact_parts, dim=-1)
 
     # ------------------------------------------------------------------
     # Combined phi + spatial-dispersion phi (single shared pass)
@@ -269,8 +425,10 @@ class VmemMonitor:
         Both methods materialise the same per-layer ``V = cat(v_list)``, its
         view, and the temporal moments ``mu``/``var``. Calling them separately
         does that work twice per frame; this fuses them so mu/var are computed
-        once and reused for kurtosis (phi) and the spatial stats. Output is
-        bit-identical to calling the two methods in sequence — verified.
+        once and reused for kurtosis (phi) and the spatial stats. Same math as
+        the two standalone methods — but call only ONE of the two spatial
+        collectors per frame: each advances the per-sequence persistence
+        state (see new_sequence()).
 
         Returns
         -------
@@ -280,6 +438,7 @@ class VmemMonitor:
         """
         phi_parts = []
         sp_parts = []
+        compact_parts = []
         for idx in sorted(self._v.keys()):
             v_list = self._v[idx]
             if not v_list:
@@ -298,16 +457,20 @@ class VmemMonitor:
             phi_parts.append(
                 torch.cat([mu.mean(-1), var.mean(-1), kurt.mean(-1)], dim=-1))
 
-            # --- spatial phi: [Var_space(mu) | participation ratio(var)] ---
+            # --- spatial phi: [Var_space(mu) | participation ratio(var)] + compact block ---
             spatial_var = mu.var(-1, unbiased=False)         # (B, C)
             s1 = var.sum(-1)                                 # (B, C)
             s2 = (var ** 2).sum(-1).clamp(min=1e-20)         # (B, C)
             spatial_pr = (s1 ** 2) / (D * s2)                # (B, C)
             sp_parts.append(torch.cat([spatial_var, spatial_pr], dim=-1))
+            compact_parts.append(self._compact_spatial_stats(
+                mu.view(B, C, H, W), var.view(B, C, H, W), idx))  # (1, 20)
 
         if not phi_parts:
             return torch.empty((0,)), torch.empty((0,))
-        return torch.cat(phi_parts, dim=-1), torch.cat(sp_parts, dim=-1)
+        self._pers_n += 1
+        return (torch.cat(phi_parts, dim=-1),
+                torch.cat(sp_parts + compact_parts, dim=-1))
 
     # ------------------------------------------------------------------
     # Spatial GAP trajectory extraction (B, T, sum(C_layers))

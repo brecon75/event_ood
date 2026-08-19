@@ -601,6 +601,9 @@ def run_benchmark():
             
             # Reset LSTM states for new sequence
             h_c = {0: None, 1: None}
+            # Reset the monitor's per-sequence persistence accumulators (the
+            # spatial-organization block's causal running stats).
+            monitor.new_sequence()
             
             # These lists hold GPU tensors temporarily for this sequence to avoid blocking syncs
             seq_phi_gpu = []
@@ -627,6 +630,14 @@ def run_benchmark():
                 with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.float16, enabled=(cfg.DEVICE == "cuda")):
                     # Pad batch using the model's input padder to ensure dimensions match up in FPN
                     padded_batch = module.input_padder.pad_tensor_ev_repr(batch)
+                    if monitor.valid_frac is None:
+                        # Derive the un-padded fraction from the padder's own
+                        # in/out shapes (padding is right+bottom, so the valid
+                        # region is the top-left crop). Resolution-free, so it
+                        # holds at every PLIF layer and for any dataset.
+                        monitor.set_valid_frac(
+                            (batch.shape[-2] / padded_batch.shape[-2],
+                             batch.shape[-1] / padded_batch.shape[-1]))
                     if snn_stem_only:
                         # phi-only: run just the PLIF stem. No backbone_features
                         # are produced — safe because SAVE_ANN/SAVE_DET are off.

@@ -20,10 +20,16 @@ Branches (each standardized on held-out clean, so a plain max is a true OR):
   B2 RCF     : | ||z|| - E[||z|| | dir] | / sd   two-sided, conditioned on
                direction via cosine-kNN -> the contraction detector
   B3 L4 d^2  : Ledoit-Wolf Mahalanobis on the layer-4 block (deep timing signal
-               the pooled radius averages away; rescues temporal_jitter)
+               the pooled radius averages away; rescues temporal_jitter).
+               Scored TWO-SIDED (|d2 - med_cal| / MAD_cal, maha_two_sided=True)
+               so contractions that push d2 BELOW the clean band fire too
   B4 spatial : (optional, only when phi_spatial is available) Ledoit-Wolf
-               Mahalanobis on the spatial-dispersion features GAP discards ->
-               the per-frame detector for spatial_dropout / event_flood
+               Mahalanobis (two-sided, as B3) on the spatial-dispersion base
+               features GAP discards, OR'd (max, ssb_fold pattern) with the
+               spatial-ORGANIZATION score when phi_spatial carries the compact
+               block: midrank-ECDF-calibrated flatness + persistence components
+               encoding the local-texture-floor and motion-non-stationarity
+               priors (use_org=True; see monitor._compact_spatial_stats)
   B5 ssb     : (opt-in, use_ssb=True + phi_synth at fit) linear logistic head vs
                SIMULATED corruptions of fit-side sequences (CutPaste-style
                self-supervision, no real corruption labels) -> cancels the
@@ -78,6 +84,21 @@ def l4_columns(phi_dim):
     return list(range(spec["phi_start"], end))
 
 
+# ---- spatial-organization compact block --------------------------------------
+# monitor._compact_spatial_stats appends 20 dims per PLIF layer to phi_spatial:
+# [cohflat_mu_w25, cohflat_mu_w12, cohflat_var_w25, cohflat_var_w12,
+#  cohq_mu(3), cohq_var(3), cohfrac_mu(3), cohfrac_var(3), persq(2), persfrac(2)]
+# Older phi_spatial files (2*sum_C dims, no block) still work — the org score is
+# simply disabled for them.
+SP_BASE_DIM = 2 * sum(s["C"] for s in LAYER_SPECS)  # [spatial_var|spatial_pr] blocks
+SP_COMPACT_PER_LAYER = 20
+# a-priori anomaly direction of each flatness dim (never chosen from labels):
+# low windowed relative-std / low coherence quantiles = "too flat" (sign -1),
+# high flat-pixel fraction = "too flat" as well but the stat GROWS (sign +1).
+_ORG_FLAT_SIGNS = np.array([-1] * 4 + [-1] * 6 + [1] * 6, np.float32)
+_ORG_PERSFRAC = slice(18, 20)
+
+
 def _ledoit_wolf(fit_arr, n_fit=5000):
     # `n_fit` is IGNORED outside --fast: `_subsample` is a no-op there, so the
     # covariance fits on the FULL set (more samples = more faithful precision).
@@ -98,7 +119,8 @@ class MDD:
     def __init__(self, k_pca=64, k_nn=64, n_ref=15000, use_spatial=True,
                  use_emp_radius=True, fusion_alpha=0.5, maha_pp=False,
                  use_rptm=False, rptm_m=512, rptm_q=0.05, rptm_seed=0,
-                 use_ssb=False, ssb_cap=150000, ssb_l2=1.0, ssb_fold=False):
+                 use_ssb=False, ssb_cap=150000, ssb_l2=1.0, ssb_fold=False,
+                 maha_two_sided=True, use_org=True):
         self.k_pca = k_pca
         self.k_nn = k_nn
         # n_ref is IGNORED outside --fast: the RCF reference uses the FULL clean
@@ -167,6 +189,29 @@ class MDD:
         # dropout 0.854 vs 0.846 at alpha=1.0). With ssb on, alpha=1.0 is the
         # sweep's Pareto point (alpha still trades polarity vs dropout).
         self.ssb_fold = bool(ssb_fold)
+        # maha_two_sided (validated 2026-08-19, 60-seq probe + full-phi check):
+        # score the l4 and spatial Mahalanobis branches as |d2 - median_cal| /
+        # MAD_cal instead of raw d2. A raw d2 is one-sided — it only fires when
+        # frames sit FARTHER from the clean mean than clean does; a distribution
+        # that CONTRACTS toward the mode ("more normal than normal") pushes d2
+        # BELOW the clean band and raw d2 inverts. Two-sided catches both tails:
+        # on the existing full-phi data it lifts event_rate_shift per-seq from
+        # 0.502 to 0.820 (l4) / 0.540 to 0.886 (spatial) with no loss on
+        # temporal_jitter, event_flood, or hot_pixel. False -> legacy raw d2.
+        self.maha_two_sided = bool(maha_two_sided)
+        # use_org (validated 2026-08-19): score the spatial-organization compact
+        # block (appended to phi_spatial by monitor._compact_spatial_stats) and
+        # fold it into the spatial branch via max (ssb_fold pattern — branch
+        # count stays 4). Components: per-layer persistence-fraction AND (min
+        # over its two thresholds) + one signed-z flatness max; each component
+        # is midrank-ECDF-calibrated against the clean fit set so weak-magnitude
+        # / strong-rank components survive the max (scale-free), then the max of
+        # the component p-values is the raw score. All clean-only; anomaly
+        # directions are fixed a priori by the natural-data priors the block
+        # encodes (local-texture floor, motion non-stationarity), never chosen
+        # from corruption labels. Auto-disabled on phi_spatial files without
+        # the compact block.
+        self.use_org = bool(use_org)
         self._fitted = False
 
     # ------------------------------------------------------------------ fit
@@ -262,14 +307,42 @@ class MDD:
         # L4 deep-layer Mahalanobis
         self.l4_cols = l4_columns(D)
         self.l4_mu, self.l4_P = _ledoit_wolf(self._mpp(phi_fit[:, self.l4_cols]))
+        if self.maha_two_sided:
+            # clean-calib center/scale of d2 so the branch can score BOTH tails
+            l4_cal = _maha_d2(np.asarray(phi_calib, np.float32)[:, self.l4_cols],
+                              self.l4_mu, self.l4_P)
+            self.l4_med = float(np.median(l4_cal))
+            self.l4_mad = float(np.median(np.abs(l4_cal - self.l4_med)) + 1e-9)
 
-        # optional spatial branch
+        # optional spatial branch (Mahalanobis on the [spatial_var|spatial_pr]
+        # base; the org compact block, when present, gets its own fold score)
         self.has_spatial = bool(self.use_spatial and phi_spatial_fit is not None)
         if self.has_spatial:
             ps = self._sanitize_spatial(phi_spatial_fit)
-            self.sp_mu_f = ps.mean(0).astype(np.float32)
-            self.sp_sd_f = (ps.std(0) + 1e-9).astype(np.float32)
-            self.sp_mu, self.sp_P = _ledoit_wolf(self._mpp((ps - self.sp_mu_f) / self.sp_sd_f))
+            n_l = len(LAYER_SPECS)
+            self.sp_base = (SP_BASE_DIM
+                            if ps.shape[1] == SP_BASE_DIM + SP_COMPACT_PER_LAYER * n_l
+                            else ps.shape[1])
+            self.has_org = bool(self.use_org and self.sp_base < ps.shape[1])
+            base = ps[:, :self.sp_base]
+            self.sp_mu_f = base.mean(0).astype(np.float32)
+            self.sp_sd_f = (base.std(0) + 1e-9).astype(np.float32)
+            self.sp_mu, self.sp_P = _ledoit_wolf(self._mpp((base - self.sp_mu_f) / self.sp_sd_f))
+            if self.maha_two_sided:
+                sp_cal = _maha_d2(self._mpp(self._std_spatial(phi_spatial_calib)),
+                                  self.sp_mu, self.sp_P)
+                self.sp_med = float(np.median(sp_cal))
+                self.sp_mad = float(np.median(np.abs(sp_cal - self.sp_med)) + 1e-9)
+            if self.has_org:
+                cb = ps[:, self.sp_base:]
+                L = cb.shape[1] // SP_COMPACT_PER_LAYER
+                flat_fit = cb.reshape(len(cb), L, SP_COMPACT_PER_LAYER)[:, :, :16]
+                self.org_fmu = flat_fit.mean(0).astype(np.float32)   # (L, 16)
+                self.org_fsd = (flat_fit.std(0) + 1e-9).astype(np.float32)
+                # sorted clean reference per component for the midrank ECDF
+                # (capped: the rank calibration saturates long before 100k rows)
+                comp = self._org_components(cb)
+                self.org_ref = np.sort(_cap_subset(comp, 100000), axis=0)
 
         # calibrate each branch's scale on held-out clean
         self._fitted = True
@@ -352,13 +425,22 @@ class MDD:
             # Mahalanobis so the radius branch also fires on covariance rotations.
             emp = (_maha_d2(self._mpp(Z), self.emp_mu, self.emp_P) - self.emp_cal_m) / self.emp_cal_s
             radius = np.maximum(radius, emp)
+        l4 = _maha_d2(phi[:, self.l4_cols], self.l4_mu, self.l4_P)
+        if getattr(self, "maha_two_sided", False):
+            l4 = np.abs(l4 - self.l4_med) / self.l4_mad
         out = {
             "radius": radius,
             "rcf": self._rcf(Z),
-            "l4": _maha_d2(phi[:, self.l4_cols], self.l4_mu, self.l4_P),
+            "l4": l4,
         }
         if getattr(self, "has_spatial", False) and phi_spatial is not None:
-            out["spatial"] = _maha_d2(self._mpp(self._std_spatial(phi_spatial)), self.sp_mu, self.sp_P)
+            sp = _maha_d2(self._mpp(self._std_spatial(phi_spatial)), self.sp_mu, self.sp_P)
+            if getattr(self, "maha_two_sided", False):
+                sp = np.abs(sp - self.sp_med) / self.sp_mad
+            out["spatial"] = sp
+            if getattr(self, "has_org", False):
+                ps = self._sanitize_spatial(phi_spatial)
+                out["org"] = self._org_score(ps[:, self.sp_base:])
         if getattr(self, "has_ssb", False):
             # one 2112-D dot product per frame; one-sided logit (higher = more
             # like the simulated corruption), calibrated like every branch.
@@ -373,7 +455,37 @@ class MDD:
         return np.nan_to_num(np.asarray(ps, np.float32), posinf=3.0e38, neginf=-3.0e38)
 
     def _std_spatial(self, ps):
-        return (self._sanitize_spatial(ps) - self.sp_mu_f) / self.sp_sd_f
+        return ((self._sanitize_spatial(ps)[:, :self.sp_base] - self.sp_mu_f)
+                / self.sp_sd_f)
+
+    def _org_components(self, compact):
+        """(N, 20*L) compact block -> (N, L+1) raw components.
+
+        Per layer: the persistence-fraction AND (min over its two thresholds —
+        both must be elevated, which suppresses single-threshold clean noise).
+        Plus one flatness component: signed z (fit-standardized, a-priori
+        directions) maxed over every flatness dim of every layer."""
+        compact = np.asarray(compact, np.float32)
+        N = len(compact)
+        L = compact.shape[1] // SP_COMPACT_PER_LAYER
+        blocks = compact.reshape(N, L, SP_COMPACT_PER_LAYER)
+        pf = blocks[:, :, _ORG_PERSFRAC].min(axis=2)                    # (N, L)
+        z = _ORG_FLAT_SIGNS * (blocks[:, :, :16] - self.org_fmu) / self.org_fsd
+        return np.concatenate([pf, z.reshape(N, -1).max(1, keepdims=True)], axis=1)
+
+    def _org_score(self, compact):
+        """Midrank-ECDF max over the org components. Rank calibration is
+        scale-free: a component whose clean spread is tiny but whose ranking
+        separates cleanly contributes on equal footing with the rest — a
+        z-scaled max would bury it under the widest component's clean tail."""
+        C = self._org_components(compact)
+        Nf = len(self.org_ref)
+        p = np.empty_like(C)
+        for j in range(C.shape[1]):
+            lo = np.searchsorted(self.org_ref[:, j], C[:, j], side="left")
+            hi = np.searchsorted(self.org_ref[:, j], C[:, j], side="right")
+            p[:, j] = (lo + hi) / (2.0 * Nf)
+        return p.max(axis=1)
 
     # ---------------------------------------------------------------- scoring
     def score_branches(self, phi, phi_spatial=None):
@@ -390,6 +502,11 @@ class MDD:
         if (getattr(self, "has_ssb", False) and getattr(self, "ssb_fold", False)
                 and "ssb" in cal and "spatial" in cal):
             cal["spatial"] = np.maximum(cal["spatial"], cal.pop("ssb"))
+        # fold the (calibrated) org score into the spatial branch — same
+        # pattern as ssb_fold, keeps the branch count (and thus the
+        # studentized median) unchanged.
+        if "org" in cal and "spatial" in cal:
+            cal["spatial"] = np.maximum(cal["spatial"], cal.pop("org"))
         stack = np.stack(list(cal.values()), axis=1)
         mx = np.max(stack, axis=1)
         a = getattr(self, "fusion_alpha", 0.0)

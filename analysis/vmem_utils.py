@@ -105,6 +105,36 @@ def split_boundary(n: int, train_ratio: float = TRAIN_RATIO, seq_lens=None) -> i
     return cut
 
 
+def split_boundaries(n: int, fracs, seq_lens):
+    """Interior cut points for a >=2-way sequence-aligned split of `n` rows.
+
+    `fracs` (summing to 1) give each split's target share of `n`. Every cut is
+    snapped to a whole-sequence boundary from `seq_lens` (cumulative sums of
+    per-sequence frame counts), so no sequence is ever divided across two
+    splits — unlike `split_boundary`, this has no ratio-only fallback: without
+    `seq_lens` there is no way to guarantee that, so it raises instead of
+    silently risking a leak. Raises if there aren't enough sequences to give
+    every split at least one whole sequence.
+    """
+    fracs = list(fracs)
+    if abs(sum(fracs) - 1.0) > 1e-6:
+        raise ValueError(f"fracs must sum to 1, got {sum(fracs)}")
+    if not seq_lens or int(np.sum(seq_lens)) != n:
+        raise ValueError("split_boundaries requires seq_lens summing to n (no leak-safe fallback)")
+    edges = np.cumsum(seq_lens)
+    interior = edges[:-1]   # candidate cut points; excludes the final edge (== n)
+    targets = np.cumsum(fracs)[:-1] * n
+    cuts, prev = [], 0
+    for t in targets:
+        remaining = interior[interior > prev]
+        if len(remaining) == 0:
+            raise ValueError("not enough sequences to honor every split")
+        cut = int(remaining[np.argmin(np.abs(remaining - t))])
+        cuts.append(cut)
+        prev = cut
+    return cuts
+
+
 def split_train_eval(arr, train_ratio: float = TRAIN_RATIO, seq_lens=None):
     """Split rows of `arr` into (train, eval) on whole sequences."""
     cut = split_boundary(len(arr), train_ratio, seq_lens)

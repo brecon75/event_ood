@@ -86,6 +86,7 @@ def resolve_defaults_and_args():
     parser.add_argument("--no-temporal-phi", action="store_true", help="Skip temporal_phi (7 handcrafted stats) collection/saving")
     parser.add_argument("--no-det", action="store_true", help="Skip detection-head forward + det_outputs (saves compute too)")
     parser.add_argument("--phi-only", action="store_true", help="Extract phi(+phi_spatial) only: implies --no-ann --no-spike --no-temporal-gap --no-temporal-phi --no-det --traj-save-n 0")
+    parser.add_argument("--spatial-only", action="store_true", help="Extract phi_spatial only (drops phi entirely): implies --phi-only")
     
     
     # We parse known args so it doesn't break if run inside environment frameworks with extra args
@@ -245,7 +246,8 @@ def resolve_defaults_and_args():
         cfg.SAVE_TPHI = False
     if args.no_det:
         cfg.SAVE_DET = False
-    if args.phi_only:
+    cfg.SPATIAL_ONLY = args.spatial_only
+    if args.phi_only or args.spatial_only:
         cfg.SAVE_ANN = cfg.SAVE_SPIKE = cfg.SAVE_TGAP = cfg.SAVE_TPHI = cfg.SAVE_DET = False
         cfg.TRAJ_SAVE_N = 0
 
@@ -693,10 +695,14 @@ def run_benchmark():
 
                 # Collect phi + spatial-dispersion phi in ONE shared pass (mu/var
                 # computed once; ~25% cheaper than two calls). KEEP ON GPU to
-                # avoid a blocking sync.
-                phi_batch, phi_spatial_batch = monitor.collect_phi_and_spatial()
-                if phi_batch.numel() > 0:
-                    seq_phi_gpu.append(phi_batch)
+                # avoid a blocking sync. --spatial-only skips phi (and its
+                # kurtosis compute) entirely via the standalone collector.
+                if cfg.SPATIAL_ONLY:
+                    phi_spatial_batch = monitor.collect_phi_spatial()
+                else:
+                    phi_batch, phi_spatial_batch = monitor.collect_phi_and_spatial()
+                    if phi_batch.numel() > 0:
+                        seq_phi_gpu.append(phi_batch)
                 if phi_spatial_batch.numel() > 0:
                     seq_phi_spatial_gpu.append(phi_spatial_batch)
 
@@ -734,9 +740,10 @@ def run_benchmark():
             # --- 4. Save this sequence's phi immediately to disk ---
             # phi and phi_spatial share one tmp file so the merge keeps them
             # row-aligned and under the same seq_lens / done_seqs metadata.
-            if seq_phi_gpu:
-                phi_seq = torch.cat(seq_phi_gpu, dim=0).cpu()
-                seq_payload = {"phi": phi_seq}
+            if seq_phi_gpu or seq_phi_spatial_gpu:
+                seq_payload = {}
+                if seq_phi_gpu:
+                    seq_payload["phi"] = torch.cat(seq_phi_gpu, dim=0).cpu()
                 if seq_phi_spatial_gpu:
                     # Stored float32 (~+60 GB across 31 runs). float16 was tried
                     # but high-activity corruptions (event_flood) push spatial_var
@@ -745,7 +752,7 @@ def run_benchmark():
                     seq_payload["phi_spatial"] = torch.cat(seq_phi_spatial_gpu, dim=0).cpu()
                 seq_pt = phi_tmp_dir / f"seq_{i:05d}.pt"
                 torch.save(seq_payload, seq_pt)
-                del phi_seq, seq_payload
+                del seq_payload
 
             # Save sequence temporal phi online
             if seq_temporal_phi_cpu:
@@ -827,9 +834,11 @@ def run_benchmark():
             saved = torch.load(phi_path, weights_only=True, map_location="cpu")
             spatial_note = (f", phi_spatial {tuple(saved['phi_spatial'].shape)}"
                             if "phi_spatial" in saved else "")
+            n_rows = saved["phi"].shape[0] if "phi" in saved else saved["phi_spatial"].shape[0]
+            label = "phi" if "phi" in saved else "phi_spatial"
             overall_pbar.write(
-                f"  Saved phi: {saved['phi'].shape[0]} rows from "
-                f"{len(saved['done_seqs'])} sequences{spatial_note} -> {phi_path.name}"
+                f"  Saved {label}: {n_rows} rows from "
+                f"{len(saved['done_seqs'])} sequences{spatial_note if 'phi' in saved else ''} -> {phi_path.name}"
             )
             del saved
         else:

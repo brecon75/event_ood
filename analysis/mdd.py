@@ -1,8 +1,10 @@
 """Manifold-Decomposition Detector (MDD).
 
 A single unsupervised OOD detector that scores each frame on orthogonal axes of
-the clean static-phi manifold and fuses them with a studentized max
-(max - alpha*median). Built from the diagnosis that event-camera corruptions
+the clean static-phi manifold and fuses them with a plain max by default
+(a studentized max - alpha*median is available via fusion_alpha, see (B) below,
+but is no longer the default now that the org-branch spatial fix makes it
+unnecessary). Built from the diagnosis that event-camera corruptions
 split into geometry classes:
 
   * DILATIONS (hot_pixel, event_rate_shift, temporal_jitter) push phi OUTWARD —
@@ -45,7 +47,11 @@ the residual corruptions without adding a branch or re-extracting:
       Disable with MDD(use_emp_radius=False).
   (B) fused = max(branches) - alpha*median(branches)  (alpha=0.5) -- studentized max
       instead of the plain max, which sat BELOW the best single branch by inflating
-      the clean floor. MDD(fusion_alpha=0.0) restores the plain max.
+      the clean floor. Superseded 2026-08-29: with the org-branch spatial fix,
+      spatial_dropout no longer needs the alpha push (already ~0.9+ at alpha=0)
+      and raising alpha only costs event_rate_shift/temporal_jitter for no gain,
+      so the default reverted to fusion_alpha=0.0 (plain max). Pass
+      MDD(fusion_alpha=0.5) to restore the old studentized behavior.
 
 Result difference (per-sequence AUROC, L5; baseline max -> improved alpha=0.5):
   corruption          baseline  improved
@@ -117,7 +123,7 @@ def _maha_d2(x, mu, P):
 
 class MDD:
     def __init__(self, k_pca=64, k_nn=64, n_ref=15000, use_spatial=True,
-                 use_emp_radius=True, fusion_alpha=0.5, maha_pp=False,
+                 use_emp_radius=True, fusion_alpha=0.0, maha_pp=False,
                  use_rptm=False, rptm_m=512, rptm_q=0.05, rptm_seed=0,
                  use_ssb=False, ssb_cap=150000, ssb_l2=1.0, ssb_fold=False,
                  maha_two_sided=True, use_org=True):

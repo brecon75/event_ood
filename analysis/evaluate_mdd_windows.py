@@ -17,11 +17,12 @@ Window aggregation = mean of per-frame branch scores within each non-overlapping
 W-frame window (tail windows shorter than W//2 are dropped). W=full reproduces
 `evaluate_mdd.py`'s per-sequence number exactly; W=1 reproduces per-frame.
 
-Leakage-safe: same sequence-aware clean train/calib/eval cut as evaluate_mdd.py;
-positives are the held-out tail of each run, cut at the matching boundary.
+Leakage-safe: same fit(50%)/calib(10%)/sensitivity(10%)/final(30%) split as
+`evaluate_mdd.py` and the rest of the unified_numbers pipeline; positives are
+the `final`-pool tail of each run, cut at the matching boundary.
 
 Outputs (under outputs/results/):
-  mdd_window_sweep.csv   AUROC / FPR95 per (corruption, severity, branch, window)
+  mdd_window_sweep.csv   AUROC / AUPR / FPR95 per (corruption, severity, branch, window)
 """
 import sys
 import argparse
@@ -33,13 +34,13 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vmem_benchmark import benchmark_config as cfg
 from analysis.vmem_utils import (
-    LazyPhiDict, TRAIN_RATIO, split_boundary, auroc_fpr95,
+    LazyPhiDict, split_boundaries, auroc_aupr_fpr95,
     seq_lens_after_cut, _get_present,
 )
 from analysis.mdd import MDD
 from analysis.evaluate_mdd import _fused
+from analysis.mdd_split_sensitivity import POOL_NAMES, POOL_FRACS
 
-CALIB_FRAC = 0.15          # clean TRAIN fraction held out to calibrate branch scales
 DEFAULT_WINDOWS = [1, 8, 16, 32, 64, 128, 256, None]   # None = full sequence
 
 
@@ -76,12 +77,11 @@ def aggregate_by_windows(scores, seq_lens, W):
 
 
 def _auroc_row(corruption, severity, branch, window, clean_s, corr_s):
-    y = np.concatenate([np.zeros(len(clean_s)), np.ones(len(corr_s))])
-    s = np.concatenate([clean_s, corr_s])
-    auroc, fpr95 = auroc_fpr95(y, s)
+    metrics = auroc_aupr_fpr95(clean_s, corr_s)
+    auroc, aupr, fpr95 = metrics if metrics else (float("nan"),) * 3
     return {"corruption": corruption, "severity": severity, "branch": branch,
             "window": ("full" if window is None else window),
-            "auroc": auroc, "fpr95": fpr95,
+            "auroc": auroc, "aupr": aupr, "fpr95": fpr95,
             "n_clean": len(clean_s), "n_corrupt": len(corr_s)}
 
 
@@ -121,12 +121,14 @@ def main():
               "aggregation needs per-sequence frame counts; re-extract first.")
         return
 
-    cut = split_boundary(len(clean), TRAIN_RATIO, clean_seq_lens)
-    fit_end = max(1, int(cut * (1.0 - CALIB_FRAC)))
-    if fit_end >= cut:
-        fit_end = max(1, cut - 1)
+    cuts = split_boundaries(len(clean), POOL_FRACS, clean_seq_lens)
+    bounds = [0] + cuts + [len(clean)]
+    ranges = {name: (bounds[i], bounds[i + 1]) for i, name in enumerate(POOL_NAMES)}
+    fa, fb = ranges["fit"]
+    ca, cb = ranges["calib"]
+    cut = ranges["final"][0]   # sensitivity pool [cb:cut) is held out of fit/calib entirely
 
-    phi_fit, phi_cal, phi_eval = clean[:fit_end], clean[fit_end:cut], clean[cut:]
+    phi_fit, phi_cal, phi_eval = clean[fa:fb], clean[ca:cb], clean[cut:]
     if len(phi_cal) == 0 or len(phi_eval) == 0:
         print(f"Error: degenerate clean split (fit={len(phi_fit)}, cal={len(phi_cal)}, "
               f"eval={len(phi_eval)}). Need more clean frames.")
@@ -134,8 +136,8 @@ def main():
 
     clean_spatial = all_phi.get_phi_spatial("clean")
     use_spatial = clean_spatial is not None
-    sp_fit = clean_spatial[:fit_end] if use_spatial else None
-    sp_cal = clean_spatial[fit_end:cut] if use_spatial else None
+    sp_fit = clean_spatial[fa:fb] if use_spatial else None
+    sp_cal = clean_spatial[ca:cb] if use_spatial else None
     sp_eval = clean_spatial[cut:] if use_spatial else None
 
     print(f"Clean split: fit={len(phi_fit)} / calib={len(phi_cal)} / eval={len(phi_eval)}; "
@@ -166,7 +168,7 @@ def main():
         phi_full = all_phi[run]
         sp_full = all_phi.get_phi_spatial(run) if use_spatial else None
         run_seq_lens_full = all_phi.get_seq_lens(run)
-        run_cut = split_boundary(len(phi_full), TRAIN_RATIO, run_seq_lens_full)
+        run_cut = split_boundaries(len(phi_full), POOL_FRACS, run_seq_lens_full)[-1]
         phi = np.ascontiguousarray(phi_full[run_cut:], dtype=np.float32)
         sp = np.ascontiguousarray(sp_full[run_cut:], dtype=np.float32) if sp_full is not None else None
         all_phi._cache.pop(run, None)

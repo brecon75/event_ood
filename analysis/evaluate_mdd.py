@@ -9,9 +9,13 @@ decision granularities:
                    `seq_lens`); the lever that rescues consistent-bias
                    corruptions like event_flood.
 
-Leakage-safe: the clean stream is cut sequence-aware into train / eval; the MDD
-is fit on the first 85% of train and its branch scales are calibrated on the
-remaining 15% (both disjoint from the eval negatives).
+Leakage-safe: uses the SAME fit(50%)/calib(10%)/sensitivity(10%)/final(30%)
+sequence-aligned split as the rest of the unified_numbers pipeline
+(`mdd_split_sensitivity.py`, `mdd_max_ci.py`, `mdd_combine_auroc.py`,
+`mdd_hparam_sensitivity.py`) -- MDD is fit on the `fit` pool and calibrated on
+the `calib` pool, both disjoint from the `sensitivity` pool (reserved for
+hyperparameter checks, held out here too) and from the `final` pool this
+script scores against.
 
 Outputs (under outputs/results/):
   mdd_metrics.csv            per-frame AUROC / FPR95 per (corruption, severity, branch)
@@ -26,12 +30,11 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vmem_benchmark import benchmark_config as cfg
 from analysis.vmem_utils import (
-    LazyPhiDict, TRAIN_RATIO, split_boundary, auroc_fpr95,
+    LazyPhiDict, split_boundaries, auroc_fpr95,
     seq_lens_after_cut, aggregate_by_seq, _get_present,
 )
 from analysis.mdd import MDD
-
-CALIB_FRAC = 0.15   # fraction of the clean TRAIN portion held out to calibrate branch scales
+from analysis.mdd_split_sensitivity import POOL_NAMES, POOL_FRACS
 
 
 def _auroc_row(corruption, severity, branch, clean_s, corr_s, granularity):
@@ -65,12 +68,14 @@ def main():
 
     clean = all_phi["clean"]
     clean_seq_lens = all_phi.get_seq_lens("clean")
-    cut = split_boundary(len(clean), TRAIN_RATIO, clean_seq_lens)
-    fit_end = max(1, int(cut * (1.0 - CALIB_FRAC)))
-    if fit_end >= cut:                       # tiny clean set: borrow one calib row
-        fit_end = max(1, cut - 1)
+    cuts = split_boundaries(len(clean), POOL_FRACS, clean_seq_lens)
+    bounds = [0] + cuts + [len(clean)]
+    ranges = {name: (bounds[i], bounds[i + 1]) for i, name in enumerate(POOL_NAMES)}
+    fa, fb = ranges["fit"]
+    ca, cb = ranges["calib"]
+    cut = ranges["final"][0]   # sensitivity pool [cb:cut) is held out of fit/calib entirely
 
-    phi_fit, phi_cal, phi_eval = clean[:fit_end], clean[fit_end:cut], clean[cut:]
+    phi_fit, phi_cal, phi_eval = clean[fa:fb], clean[ca:cb], clean[cut:]
     if len(phi_cal) == 0 or len(phi_eval) == 0:
         print(f"Error: degenerate clean split (fit={len(phi_fit)}, cal={len(phi_cal)}, "
               f"eval={len(phi_eval)}). Need more clean frames.")
@@ -78,8 +83,8 @@ def main():
 
     clean_spatial = all_phi.get_phi_spatial("clean")
     use_spatial = clean_spatial is not None
-    sp_fit = clean_spatial[:fit_end] if use_spatial else None
-    sp_cal = clean_spatial[fit_end:cut] if use_spatial else None
+    sp_fit = clean_spatial[fa:fb] if use_spatial else None
+    sp_cal = clean_spatial[ca:cb] if use_spatial else None
     sp_eval = clean_spatial[cut:] if use_spatial else None
 
     print(f"Clean split: fit={len(phi_fit)} / calib={len(phi_cal)} / eval={len(phi_eval)} "
@@ -110,7 +115,7 @@ def main():
         # sequence-aligned boundary as clean so the train-portion frames (whose
         # clean twins the MDD was fitted/calibrated on) are excluded.
         run_seq_lens_full = all_phi.get_seq_lens(run)
-        run_cut = split_boundary(len(phi_full), TRAIN_RATIO, run_seq_lens_full)
+        run_cut = split_boundaries(len(phi_full), POOL_FRACS, run_seq_lens_full)[-1]
         # Contiguous copies of just the held-out tail (~0.4 GB phi, ~0.3 GB spatial).
         # Breaking the numpy view chain lets us evict the full 2.9/1.9 GB arrays now.
         phi = np.ascontiguousarray(phi_full[run_cut:], dtype=np.float32)

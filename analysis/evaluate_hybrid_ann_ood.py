@@ -58,6 +58,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vmem_benchmark import benchmark_config as cfg
 from analysis.vmem_utils import (
     split_train_eval, split_boundary, load_phi_seq_lens, TRAIN_RATIO, auroc_aupr_fpr95,
+    pool_ranges,
 )
 from analysis.evaluate_ann_baselines import (
     DetectorMSP, DetectorEnergy, DetectorODIN, DetectorMaxLogit, DetectorGEN,
@@ -125,12 +126,13 @@ def evaluate_feat_key(ann_dir, feat_key, limit=None):
               f"split. (Per-sequence legacy file? Re-extract per-frame ANN feats.)")
         return []
 
-    # Sequence-aware 70/30 split (same convention as every other stage): fit on
-    # the train portion of clean, use only the held-out tail as ID negatives so
-    # no detector — kNN especially — scores its own fitting data.
     clean_seq_lens = load_phi_seq_lens("clean", artifact_dir=ann_dir)
-    fit_feat, eval_feat = split_train_eval(c_feat, seq_lens=clean_seq_lens)
-    fit_logit, eval_logit = split_train_eval(c_logit, seq_lens=clean_seq_lens)
+    # Canonical 4-way pools: fit on `fit` (50%), report on `final` (30%) --
+    # the same sequence-aligned boundaries every MDD table uses.
+    _r = pool_ranges(len(c_feat), clean_seq_lens)
+    (_fa, _fb), (_ea, _eb) = _r["fit"], _r["final"]
+    fit_feat, eval_feat = c_feat[_fa:_fb], c_feat[_ea:_eb]
+    fit_logit, eval_logit = c_logit[_fa:_fb], c_logit[_ea:_eb]
 
     detectors = _build_detectors()
     print(f"[{feat_key}] fitting {len(detectors)} detectors on "
@@ -157,8 +159,9 @@ def evaluate_feat_key(ann_dir, feat_key, limit=None):
 
         # Positives = held-out tail only, matched to the clean negatives'
         # held-out sequences. feat/logit are row-aligned: cut both identically.
-        run_cut = split_boundary(len(t_feat), TRAIN_RATIO,
-                                 load_phi_seq_lens(run_name, artifact_dir=ann_dir))
+        run_cut = pool_ranges(
+            len(t_feat),
+            load_phi_seq_lens(run_name, artifact_dir=ann_dir))["final"][0]
         t_feat, t_logit = t_feat[run_cut:], t_logit[run_cut:]
 
         parts = run_name.rsplit("_L", 1)

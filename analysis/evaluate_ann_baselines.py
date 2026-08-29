@@ -11,6 +11,7 @@ from vmem_benchmark import benchmark_config as cfg
 from analysis.vmem_utils import (
     split_train_eval, load_phi_seq_lens, chunked_apply, knn_score,
     device_for, split_boundary, TRAIN_RATIO, query_chunk_rows, calc_fpr95, auroc_aupr_fpr95,
+    pool_ranges,
 )
 from analysis.gpu_fit import ledoit_wolf_precision
 import functools
@@ -135,22 +136,61 @@ class DetectorMahalanobis:
         return _chunk_feats(fn, feats, device, P.shape[0])
 
 class DetectorKNN:
-    """Deep nearest-neighbour OOD (Sun et al., ICML 2022). Two faithful details
-    the earlier version dropped: (1) features are L2-normalised before any
-    distance is taken (z = h/||h||_2), and (2) the score is the distance to the
+    """Deep nearest-neighbour OOD (Sun et al., ICML 2022). Faithful on both
+    details: (1) features are L2-normalised before any distance is taken
+    (z = h/||h||_2, their Sec. 3), and (2) the score is the distance to the
     k-th nearest training neighbour r_k(z) = ||z - z_(k)||_2, NOT the mean of
-    the k distances. k=50 follows the paper's CIFAR-10 setting, clamped to the
-    available fit set."""
-    def __init__(self, k=50): self.k = k; self._ref = None; self._k = k
+    the k distances (their decision function G(z;k) = 1{-r_k(z) >= lambda}).
+
+    CHOICE OF k (was a real deviation, now explicit). The paper gives two
+    anchors, and each is tied to its reference-set size:
+
+        CIFAR-10   k = 50     over    50,000 refs   ->  k/N = 0.00100
+        ImageNet   k = 1000   over 1,280,000 refs   ->  k/N = 0.00078
+
+    So both published settings are "k is about 0.1% of the reference set", and
+    NEITHER absolute value transfers to our ~204k-frame clean reference by
+    authority. Hardcoding k=50 "following CIFAR-10" was an unjustified pick: it
+    would be 4x sparser, relative to the reference, than either paper setting.
+
+    `k=None` (the default) applies the RATIO the paper's own two anchors hold
+    (K_RATIO below, their geometric mean), which reproduces k=47 at CIFAR-10
+    scale and k=1127 at ImageNet scale -- i.e. it interpolates published
+    operating points rather than inventing one. The resolved k is recorded in
+    `_k_note` and must be reported. Pass an int to pin it (k=50 reproduces the
+    literal CIFAR-10 setting).
+
+    Rejected alternative, recorded so it is not retried: selecting k on the
+    sensitivity pool by the tightest clean-score band (lowest coefficient of
+    variation). That criterion is DEGENERATE -- kth-NN distances get smoother
+    monotonically in k, so it always returns the largest candidate regardless of
+    the data.
+    """
+    K_RATIO = float(np.sqrt((50 / 50_000) * (1000 / 1_280_000)))   # ~= 0.00088
+
+    def __init__(self, k=None): self.k = k; self._ref = None; self._k = k
     @staticmethod
     def _normalize(feats):
         x = _np(feats)
         return x / (np.linalg.norm(x, axis=1, keepdims=True) + 1e-10)
-    def fit(self, feats, logits):
+    def fit(self, feats, logits, select_on=None):
         # Keep the L2-normalised reference; the GPU-streaming knn_score handles
         # it without resident-whole uploads. k clamped to available samples.
         self._ref = self._normalize(feats).astype(np.float32)
-        self._k = max(1, min(self.k, self._ref.shape[0]))
+        if self.k is not None:
+            self._k = max(1, min(self.k, self._ref.shape[0]))
+        else:
+            self._k = self._select_k(select_on)
+
+    def _select_k(self, select_on=None):
+        """k from the reference-set size, at the ratio the paper's own two
+        anchors share (see the class docstring). Depends on nothing but N, so
+        it consults no corrupted data and no labels."""
+        n = self._ref.shape[0]
+        k = int(max(1, min(round(self.K_RATIO * n), n)))
+        self._k_note = (f"{k} (= {self.K_RATIO:.5f} x {n} refs; the k/N ratio "
+                        f"shared by the paper's CIFAR-10 and ImageNet settings)")
+        return k
     def score(self, feats, logits):
         # Distance to the k-th nearest neighbour (Sun et al. 2022), GPU-chunked.
         return knn_score(self._ref, self._k, self._normalize(feats),
@@ -204,11 +244,45 @@ class DetectorViM:
     synthetic unit tests), we fall back to mean-centring so the detector still
     yields a finite, correctly-shaped score.
     """
-    def __init__(self, D=256):
+    DIM_NOTE = ""
+
+    def __init__(self, D=None):
         self.D = D
         self.NS = None
         self.o = None
         self.alpha = 1.0
+
+    @staticmethod
+    def principal_dim(d):
+        """The paper's rule for the principal-subspace dimension D, plus the
+        guard it needs at small d.
+
+        Wang et al. state it exactly once (Sec. 4.1): "For feature spaces with
+        dimension N>1500, we set D=1000, and set D=512 otherwise."
+
+        That rule is DEGENERATE for d <= 512: it returns D=512, leaving a
+        residual subspace P-perp of dimension d-D <= 0. ViM's virtual logit is
+        the residual NORM, so at d=512 the score is identically zero and the
+        detector is undefined. (Their own evaluations are all on d in
+        {768, 2048}, where the rule is well posed.) An earlier version of this
+        file silently substituted D=256 with no comment, which is exactly the
+        kind of unrecorded deviation this suite is not allowed to carry.
+
+        We therefore apply the published rule wherever it is well posed, and
+        fall back to a HALF-AND-HALF split (D = d//2) only where the rule would
+        produce an empty residual. The fallback is chosen to match the residual
+        FRACTION the paper's own settings imply -- d=2048/D=1000 leaves 51% of
+        the space in the residual, d=768/D=512 leaves 33% -- rather than being
+        tuned. Which branch was taken is recorded in DIM_NOTE and must be
+        reported alongside any ViM number.
+        """
+        paper_D = 1000 if d > 1500 else 512
+        if paper_D < d:
+            return paper_D, f"D={paper_D} (paper rule, d={d})"
+        fallback = max(1, d // 2)
+        return fallback, (f"D={fallback} (d={d}: paper rule gives D={paper_D} >= d, "
+                          f"which leaves an EMPTY residual subspace and makes ViM "
+                          f"undefined; fell back to d//2)")
 
     def fit(self, feats, logits):
         f = _np(feats)
@@ -227,7 +301,10 @@ class DetectorViM:
         Xt = torch.from_numpy(np.ascontiguousarray(f - self.o, np.float32)).to(device)
         cov = (Xt.T @ Xt) / Xt.shape[0]                   # about o, not re-centred
         _, eigvecs = torch.linalg.eigh(cov)               # ascending eigenvalues
-        D = min(self.D, max(1, d - 1))                    # keep >=1 residual dim
+        if self.D is None:
+            D, self.DIM_NOTE = self.principal_dim(d)
+        else:
+            D, self.DIM_NOTE = min(self.D, d - 1), f"D={self.D} (caller-pinned)"
         NS = eigvecs[:, : d - D]                          # minor (residual) subspace
         self.NS = NS.cpu().numpy().astype(np.float32)
         vlogit_train = torch.norm(Xt @ NS, dim=1)
@@ -500,16 +577,43 @@ class DetectorNECO:
     (StandardScaler: subtract mean, divide by std) and fits PCA on the ID
     training set; the score (Eq. 8) is NECO(x) = ||P h(x)|| / ||h(x)||, the
     fraction of the standardised feature's norm captured by the top-d
-    neural-collapse subspace. Because the ResNet-18 penultimate width (512) is
-    smaller than the number of classes (1000), the paper multiplies by the max
-    logit ("class-based information injection"). ID features concentrate in the
-    collapse subspace and are confident -> large; OOD -> small, so the OOD score
-    is negated. Uses the stored logits' max (no head needed)."""
-    def __init__(self, dim=100):
-        self.dim = dim
+    neural-collapse subspace. ID features concentrate in the collapse
+    subspace and are confident -> large; OOD -> small, so the OOD score is
+    negated. Uses the stored logits' max (no head needed).
+
+    TWO DEVIATIONS FIXED (both were real):
+
+    (1) DIMENSION d. An earlier version hardcoded d=100. The paper specifies no
+        such default -- its Table C.5 reports d ranging 40-730 across ID/OOD
+        configurations, and the stated selection rule (Sec. 4.2) is to keep the
+        first d principal components that "explain at least 90% of the ID
+        variance from the train dataset". We now implement that rule
+        (`var_frac=0.90`); the resolved d is recorded in `dim_note`.
+
+    (2) MAX-LOGIT MULTIPLICATION. The earlier version skipped the multiply for
+        ResNet, citing the reference implementation's
+        `if model_architecture_type != 'resnet'` branch. But the PAPER's
+        Table C.4 reports the multiplication improving ResNet-18 as well, so
+        reference impl and paper text disagree. We follow the PAPER (multiply by
+        default) and expose `use_maxlogit` to reproduce the reference impl's
+        ResNet branch.
+
+        IMPORTANT for this project: the multiply is only meaningful when the
+        logits are a TRAINED class posterior over the in-distribution. It must
+        be turned OFF for any host without one -- which includes every
+        representation in this repo's ablation (phi has no logits at all) and
+        the ImageNet-head ResNet baseline (whose posterior is over ImageNet
+        classes, not clean event data). Callers pass use_maxlogit=False there;
+        it is not a formula change but a statement that the term is undefined.
+    """
+    def __init__(self, var_frac=0.90, use_maxlogit=True, dim=None):
+        self.var_frac = var_frac
+        self.use_maxlogit = use_maxlogit
+        self.dim = dim            # None => resolve by the paper's variance rule
         self.mu = None
         self.sd = None
         self.V = None
+        self.dim_note = ""
     def fit(self, feats, logits):
         f = _np(feats).astype(np.float32)
         self.mu = f.mean(0)
@@ -518,8 +622,19 @@ class DetectorNECO:
         device = device_for("NECO fit (standardise + PCA / eigh)")
         Xt = torch.from_numpy(np.ascontiguousarray(fs, np.float32)).to(device)
         cov = (Xt.T @ Xt) / max(Xt.shape[0], 1)
-        _, evecs = torch.linalg.eigh(cov)                 # ascending eigenvalues
-        d = min(self.dim, max(1, f.shape[1] - 1))
+        evals, evecs = torch.linalg.eigh(cov)             # ascending eigenvalues
+        if self.dim is not None:
+            d = min(self.dim, max(1, f.shape[1] - 1))
+            self.dim_note = f"d={d} (caller-pinned)"
+        else:
+            # Paper's rule: smallest d whose top-d PCs explain >= var_frac of
+            # the ID variance. eigh is ascending, so reverse before cumsum.
+            ev = torch.flip(evals.clamp_min(0), dims=[0])
+            frac = torch.cumsum(ev, 0) / ev.sum().clamp_min(1e-12)
+            d = int((frac >= self.var_frac).nonzero()[0].item()) + 1
+            d = min(max(1, d), max(1, f.shape[1] - 1))
+            self.dim_note = (f"d={d} (paper rule: top-d PCs explain "
+                             f">={self.var_frac:.0%} of ID variance)")
         self.V = evecs[:, -d:].cpu().numpy().astype(np.float32)   # top-d directions
     def score(self, feats, logits):
         device = _device()
@@ -530,8 +645,11 @@ class DetectorNECO:
             h = (c - mu) / sd                              # standardised feature
             return torch.norm(h @ V, dim=1) / torch.norm(h, dim=1).clamp_min(1e-6)
         ratio = _chunk_feats(fn, feats, device, V.shape[1])
-        maxlogit = _np(logits).max(axis=1)
-        return -(ratio * maxlogit)
+        if self.use_maxlogit and logits is not None:
+            # Eq. 9 / Table C.4: NECO * MaxLogit. Only defined when the logits
+            # are a trained ID class posterior (see the class docstring).
+            ratio = ratio * _np(logits).max(axis=1)
+        return -ratio
 
 
 class DetectorNNGuide:
@@ -672,8 +790,11 @@ def evaluate_representation(rep_name, rep_dir, limit=None):
     # portion, use only the HELD-OUT portion as clean negatives so detectors
     # (especially kNN) never score their own fitting data.
     seq_lens = load_phi_seq_lens("clean")
-    fit_feats, eval_feats = split_train_eval(c_feats, seq_lens=seq_lens)
-    fit_logits, eval_logits = split_train_eval(c_logits, seq_lens=seq_lens)
+    # Canonical 4-way pools: fit on `fit` (50%), report on `final` (30%).
+    _r = pool_ranges(len(c_feats), seq_lens)
+    (_fa, _fb), (_ea, _eb) = _r["fit"], _r["final"]
+    fit_feats, eval_feats = c_feats[_fa:_fb], c_feats[_ea:_eb]
+    fit_logits, eval_logits = c_logits[_fa:_fb], c_logits[_ea:_eb]
 
     device_for(f"scoring {len(detectors)} ANN baseline detectors ({rep_name})")
     for name, det in detectors.items():
@@ -697,7 +818,7 @@ def evaluate_representation(rep_name, rep_dir, limit=None):
         # Positives = held-out tail of the run only, matched to the clean
         # negatives' held-out sequences. feat/logit are row-aligned, so cut both
         # at the same sequence-aligned boundary.
-        run_cut = split_boundary(len(t_feats), TRAIN_RATIO, load_phi_seq_lens(run_name))
+        run_cut = pool_ranges(len(t_feats), load_phi_seq_lens(run_name))["final"][0]
         t_feats, t_logits = t_feats[run_cut:], t_logits[run_cut:]
 
         parts = run_name.rsplit('_L', 1)

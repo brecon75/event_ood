@@ -12,8 +12,53 @@ from vmem_benchmark import benchmark_config as cfg
 from analysis.vmem_utils import (
     slice_phi_stat, split_train_eval, held_out_eval, load_phi_seq_lens,
     chunked_apply, device_for, load_pt, materialize_f32, calc_fpr95, auroc_aupr_fpr95,
+    pool_ranges, seq_lens_after_cut,
 )
 from analysis.gpu_fit import empirical_precision
+
+# Score all five severities: phi/phi_spatial for L2 and L4 exist on disk for
+# every corruption, only the scoring config was ever trimmed to [1,3,5].
+cfg.SEVERITIES = [1, 2, 3, 4, 5]
+
+# outputs/phi/ also holds throwaway free-rider probe artifacts (random_*.pt,
+# raw_*.pt, _tmp_*). Globbing the directory turns them into rows with invented
+# corruption names like "random_hot_pixel". Only these are real runs.
+VALID_RUNS = {"clean"} | {f"{c}_L{s}" for c in cfg.CORRUPTIONS for s in cfg.SEVERITIES}
+
+# The 1488-D phi_spatial re-extraction (organizational stats: flatness + causal
+# persistence, commit 34af9dd) lives in a top-level folder. The phi_spatial
+# block inside outputs/phi/<run>.pt is the older 1408-D version.
+SPATIAL_DIR = cfg.REPO_ROOT / "phi_spatial"
+
+
+# z-scoring statistics for `phi_plus_spatial`, fitted once on clean and then
+# frozen (see the rep's branch in extract_representation for why per-run
+# statistics would be wrong). Populated on the first clean call, which main()
+# always makes before any corruption run.
+_PAIR_STATS = {}
+
+
+def load_phi_spatial_1488(run_name):
+    for name in (f"{run_name}.pt", f"{run_name} (1).pt"):
+        p = SPATIAL_DIR / name
+        if p.exists():
+            ps = load_pt(p).get("phi_spatial", None)
+            return materialize_f32(ps) if ps is not None else None
+    return None
+
+
+# ── canonical 4-way pools ────────────────────────────────────────────────────
+# Was a 70/30 split, which made this stage's numbers non-comparable with every
+# MDD table. Now fit on `fit` (50%) and report on `final` (30%), the exact
+# pools evaluate_mdd.py uses.
+def fit_rows(arr, seq_lens):
+    a, b = pool_ranges(len(arr), seq_lens)["fit"]
+    return arr[a:b]
+
+
+def final_rows(arr, seq_lens):
+    a, b = pool_ranges(len(arr), seq_lens)["final"]
+    return arr[a:b]
 
 def fit_mahalanobis(train_feat):
     """Fit mean + precision once and return a score(test_feat) closure.
@@ -64,7 +109,8 @@ class LazyFeatures(Mapping):
     the bound (callers iterate the view directly)."""
 
     def __init__(self, cache_size: int = 2, verbose: bool = True):
-        self._phi_files = {f.stem: f for f in cfg.PHI_DIR.glob("*.pt")}
+        self._phi_files = {f.stem: f for f in cfg.PHI_DIR.glob("*.pt")
+                           if f.stem in VALID_RUNS}
         self._ann_files = ({f.stem: f for f in cfg.ANN_DIR.glob("*.pt")}
                            if cfg.ANN_DIR.exists() else {})
         self._spike_files = ({f.stem: f for f in cfg.SPIKE_DIR.glob("*.pt")}
@@ -148,12 +194,33 @@ def load_all_features(cache_size: int = 2, verbose: bool = True):
     loads on demand so the fit/eval stages stay within a few runs of memory."""
     return LazyFeatures(cache_size=cache_size, verbose=verbose)
 
-def extract_representation(feats, rep_name):
+def extract_representation(feats, rep_name, run_name=None):
     """
     Given a dict of {phi, ann, spike} features for a run, return the specific representation as a 2D numpy array.
     """
     if rep_name == "full_membrane":
         return feats['phi']
+    elif rep_name == "phi_spatial":
+        # The spatial-dispersion read-out on its own: the signal GAP discards.
+        return load_phi_spatial_1488(run_name) if run_name else None
+    elif rep_name == "phi_plus_spatial":
+        # The union the shipped MDD actually sees. The two halves are z-scored
+        # because raw phi and raw phi_spatial differ in magnitude by orders of
+        # magnitude, so an un-normalised concat would let the larger block
+        # dominate the Mahalanobis fit for a UNITS reason rather than an
+        # information one.
+        #
+        # The transform is fitted on CLEAN ONLY and then held fixed. Deriving it
+        # per run would standardize each corrupted run by its own statistics and
+        # subtract out exactly the shift the detector is meant to see.
+        sp = load_phi_spatial_1488(run_name) if run_name else None
+        if sp is None:
+            return None
+        both = np.concatenate([feats['phi'], sp], axis=1)
+        if not _PAIR_STATS:
+            _PAIR_STATS["mu"] = both.mean(0)
+            _PAIR_STATS["sd"] = both.std(0) + 1e-8
+        return (both - _PAIR_STATS["mu"]) / _PAIR_STATS["sd"]
     elif rep_name == "membrane_mean":
         return slice_phi_stat(feats['phi'], 'mu')
     elif rep_name == "membrane_var":
@@ -173,7 +240,7 @@ def extract_representation(feats, rep_name):
         return feats.get('spike', {}).get('spike_entropy')
     elif rep_name == "membrane_fused" and 'fused' in feats:
         return feats['fused'].get('membrane_fused')
-    
+
     return None
 
 def main():
@@ -182,13 +249,13 @@ def main():
     if 'clean' not in all_feats:
         print("Error: 'clean' run not found. Run extract.py first.")
         return
-        
+
     reps = [
-        "logits", "ANN", "spike", "spike_entropy", 
+        "logits", "ANN", "spike", "spike_entropy",
         "membrane_mean", "membrane_var", "membrane_kurtosis", "full_membrane",
-        "membrane_fused"
+        "phi_spatial", "phi_plus_spatial", "membrane_fused"
     ]
-    
+
     results = []
     clean_seq_lens = load_phi_seq_lens("clean")
 
@@ -199,15 +266,15 @@ def main():
     print(f"Fitting {len(reps)} representation scorers on clean...")
     fitted = {}   # rep -> (scorer, clean_scores, train_width)
     for rep in reps:
-        train_feat = extract_representation(all_feats['clean'], rep)
+        train_feat = extract_representation(all_feats['clean'], rep, 'clean')
         if train_feat is None:
             print(f"Skipping {rep} (not found)")
             continue
-        # Sequence-aware 70/30 split: fit on the train portion, score the
-        # held-out clean frames as negatives. A random frame-level split would
-        # leak near-identical neighboring frames between fit and eval.
-        train_feat_fit, clean_test_feat = split_train_eval(
-            train_feat, seq_lens=clean_seq_lens)
+        # Canonical 4-way pools (sequence-aligned): fit on `fit` (50%), score
+        # the `final` pool (30%) as clean negatives -- the same boundaries
+        # every MDD table uses, so the two are directly comparable.
+        train_feat_fit = fit_rows(train_feat, clean_seq_lens)
+        clean_test_feat = final_rows(train_feat, clean_seq_lens)
         scorer = fit_mahalanobis(train_feat_fit)
         fitted[rep] = (scorer, scorer(clean_test_feat), train_feat_fit.shape[1])
 
@@ -219,15 +286,15 @@ def main():
         severity = int(parts[1]) if len(parts) > 1 else 0
 
         for rep, (scorer, clean_scores, train_width) in fitted.items():
-            test_feat = extract_representation(feats, rep)
+            test_feat = extract_representation(feats, rep, run_name)
             if test_feat is None:
                 continue
             if test_feat.shape[1] != train_width:
                 continue   # representation width differs for this run — skip
 
-            # Positives = held-out tail of the run only, matched to the clean
-            # negatives' held-out sequences.
-            test_feat = held_out_eval(test_feat, seq_lens=load_phi_seq_lens(run_name))
+            # Positives = the run's `final` pool only, cut at the same
+            # sequence-aligned boundary as the clean negatives.
+            test_feat = final_rows(test_feat, load_phi_seq_lens(run_name))
             corr_scores = scorer(test_feat)
 
             metrics = auroc_aupr_fpr95(clean_scores, corr_scores)
@@ -245,7 +312,7 @@ def main():
                 "aupr": aupr,
                 "fpr95": fpr95
             })
-            
+
     df = pd.DataFrame(results)
     out_dir = cfg.OUTPUT_DIR / "results"
     out_dir.mkdir(parents=True, exist_ok=True)

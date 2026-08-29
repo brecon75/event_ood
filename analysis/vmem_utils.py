@@ -135,6 +135,34 @@ def split_boundaries(n: int, fracs, seq_lens):
     return cuts
 
 
+# ── the canonical 4-way pool split ───────────────────────────────────────────
+# ONE split scheme for every reported number in the project (see
+# unified_numbers/README.md). Defined here rather than in mdd_split_sensitivity
+# so the representation/detector/information stages can share it without
+# importing an MDD module.
+#
+#   fit         50%  detector statistics (covariance, PCA basis, kNN reference)
+#   calib       10%  score standardization / threshold calibration
+#   sensitivity 10%  hyperparameter sweeps + model selection; never fit/calib
+#   final       30%  every reported AUROC/AUPR/FPR95/CI
+#
+# Cuts are sequence-aligned, so no recording contributes frames to two pools.
+POOL_NAMES = ["fit", "calib", "sensitivity", "final"]
+POOL_FRACS = [0.50, 0.10, 0.10, 0.30]
+
+
+def pool_ranges(n: int, seq_lens):
+    """{pool_name: (start, stop)} for the canonical 4-way split of `n` rows."""
+    bounds = [0] + split_boundaries(n, POOL_FRACS, seq_lens) + [n]
+    return {name: (bounds[i], bounds[i + 1]) for i, name in enumerate(POOL_NAMES)}
+
+
+def pool_slice(arr, seq_lens, pool: str):
+    """Rows of `arr` belonging to one canonical pool."""
+    a, b = pool_ranges(len(arr), seq_lens)[pool]
+    return arr[a:b]
+
+
 def split_train_eval(arr, train_ratio: float = TRAIN_RATIO, seq_lens=None):
     """Split rows of `arr` into (train, eval) on whole sequences."""
     cut = split_boundary(len(arr), train_ratio, seq_lens)
